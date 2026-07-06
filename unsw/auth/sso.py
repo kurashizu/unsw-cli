@@ -66,42 +66,15 @@ async def _verify_moodle_cookie(cookie_value: str) -> bool:
 
 
 async def _verify_myunsw_session(cookies: dict[str, str]) -> bool:
-    """Verify myUNSW session cookies by accessing the student portal."""
-    # Build full cookie jar — myUNSW needs both the myUNSW cookies and any
-    # Azure AD SSO cookies that may be required for cross-domain auth.
-    client = httpx.Client(
-        follow_redirects=False,
-        timeout=15.0,
-        cookies=cookies,
-        headers={"User-Agent": USER_AGENT},
-    )
-    try:
-        # First request — may redirect through SSO chain
-        resp = client.get(f"{MYUNSW_URL}/")
-        # If we got a non-redirect with no login URL in it, we're authenticated
-        if resp.status_code == 200 and "login" not in str(resp.url).lower():
-            return True
-        # If we got redirected, follow once more to see if we end up logged in
-        if resp.status_code in (302, 303, 307, 308):
-            location = resp.headers.get("location", "")
-            # If redirect is to login.microsoftonline.com, we need SSO cookies
-            # If redirect is back to myUNSW root, follow it
-            if "login.microsoftonline.com" in location or "my.unsw.edu.au" in location:
-                resp2 = client.get(location)
-                # After SSO round-trip, we should land on a dashboard
-                if resp2.status_code == 200 and "login" not in str(resp2.url).lower():
-                    return True
-                # Even another redirect chain means we're authenticated
-                if resp2.status_code in (302, 303, 307, 308):
-                    location2 = resp2.headers.get("location", "")
-                    if (
-                        "login.microsoftonline.com" not in location2
-                        and "login" not in location2.lower()
-                    ):
-                        return True
-        return False
-    except Exception:
-        return False
+    """Verify myUNSW session cookies by accessing the protected portal URL.
+
+    The root URL returns a 200 search page even when not authenticated,
+    so we use /portal/ which redirects to sso.unsw.edu.au/cas/login when
+    the user is not signed in.
+    """
+    from unsw.auth.myunsw import _check_session_cookies
+
+    return _check_session_cookies(cookies)
 
 
 async def _wait_for_moodle_login(context) -> Optional[str]:

@@ -41,39 +41,21 @@ class TestSSOVerifyHelpers:
     @pytest.mark.asyncio
     @respx.mock
     async def test_verify_myunsw_session_direct_200(self):
-        """Direct 200 to myUNSW dashboard → valid."""
-        respx.get(MYUNSW_URL + "/").mock(
+        """Direct 200 to /portal/ → valid."""
+        respx.get(MYUNSW_URL + "/portal/").mock(
             return_value=httpx.Response(200, text="<html>Student Portal</html>")
         )
         assert await _verify_myunsw_session({"PS_TOKEN": "abc"}) is True
 
     @pytest.mark.asyncio
     @respx.mock
-    async def test_verify_myunsw_session_redirect_to_myunsw(self):
-        """Redirect to myUNSW root → valid (already authed)."""
-        # First request returns a redirect to myUNSW itself
-        respx.get(MYUNSW_URL + "/").mock(
-            return_value=httpx.Response(
-                302,
-                text="",
-                headers={"location": f"{MYUNSW_URL}/portal"},
-            )
-        )
-        # Following that redirect lands on a portal page
-        respx.get(f"{MYUNSW_URL}/portal").mock(
-            return_value=httpx.Response(200, text="<html>Portal</html>")
-        )
-        assert await _verify_myunsw_session({"PS_TOKEN": "abc"}) is True
-
-    @pytest.mark.asyncio
-    @respx.mock
     async def test_verify_myunsw_session_redirect_to_login(self):
-        """Redirect to login URL → invalid."""
-        respx.get(MYUNSW_URL + "/").mock(
+        """Redirect to CAS login → invalid."""
+        respx.get(MYUNSW_URL + "/portal/").mock(
             return_value=httpx.Response(
                 302,
                 text="",
-                headers={"location": f"{MYUNSW_URL}/login"},
+                headers={"location": "https://sso.unsw.edu.au/cas/login?service=..."},
             )
         )
         assert await _verify_myunsw_session({}) is False
@@ -82,7 +64,7 @@ class TestSSOVerifyHelpers:
     @respx.mock
     async def test_verify_myunsw_network_error(self):
         """Network errors → False (gracefully)."""
-        respx.get(MYUNSW_URL + "/").mock(side_effect=httpx.ConnectError("fail"))
+        respx.get(MYUNSW_URL + "/portal/").mock(side_effect=httpx.ConnectError("fail"))
         assert await _verify_myunsw_session({}) is False
 
 

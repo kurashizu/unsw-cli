@@ -34,6 +34,16 @@ class MyUNSWModule(BaseModule):
 
     # ── Enrolled Courses ─────────────────────────────────────
 
+    # PeopleSoft URLs for authenticated users
+    ENROLLED_URL = (
+        "https://my.unsw.edu.au/psc/ps/EMPLOYEE/HRMS/c/"
+        "SA_LEARNER_SERVICES.SSR_SSENRL_LIST.GBL"
+    )
+    TIMETABLE_URL = (
+        "https://my.unsw.edu.au/psc/ps/EMPLOYEE/HRMS/c/"
+        "SA_LEARNER_SERVICES.SSR_SSREP_SUMMARY.GBL"
+    )
+
     def get_enrolled_courses(self) -> list[dict[str, Any]]:
         """Get list of currently enrolled courses by scraping myUNSW.
 
@@ -43,25 +53,30 @@ class MyUNSWModule(BaseModule):
             return []
 
         try:
-            # Access the myUNSW student portal
-            resp = self.client.get(f"{MYUNSW_BASE}/")
+            # Access the myUNSW enrolled classes page (PeopleSoft)
+            resp = self.client.get(self.ENROLLED_URL)
             if resp.status_code != 200:
-                return []
+                # Fallback: try the portal root
+                resp = self.client.get(f"{MYUNSW_BASE}/portal/")
+                if resp.status_code != 200:
+                    return []
 
             soup = BeautifulSoup(resp.text, "html.parser")
             courses = []
             seen = set()
 
             # Try multiple approaches to find enrolled courses
-
-            # Approach 1: Look for course cards / enrolment tables
+            # 1. Look for course cards / enrolment tables
             for item in soup.select(
                 '[class*="course"], [class*="enrol"], '
                 '[class*="class"], .ps_box-group, '
-                "table tr, [id*="
-                "course], [id*=enrol]"
+                "table[id*='SSR_SSENRL'] tr, "
+                "table[id*='CLASS'] tr, "
+                "[class*='psc-row'], [class*='ps_grid-row']"
             ):
-                text = item.get_text(strip=True)
+                text = item.get_text(" ", strip=True)
+                if not text:
+                    continue
                 # Look for course codes like COMP6733
                 codes = re.findall(r"[A-Z]{4}\d{4}", text)
                 for code in codes:
@@ -84,6 +99,22 @@ class MyUNSWModule(BaseModule):
                                 "code": code,
                                 "name": name or code,
                                 "term": term,
+                                "status": "Enrolled",
+                            }
+                        )
+
+            # 2. Fallback: scan the entire page for course codes
+            if not courses:
+                full_text = soup.get_text(" ", strip=True)
+                codes = re.findall(r"[A-Z]{4}\d{4}", full_text)
+                for code in codes:
+                    if code not in seen:
+                        seen.add(code)
+                        courses.append(
+                            {
+                                "code": code,
+                                "name": code,
+                                "term": "",
                                 "status": "Enrolled",
                             }
                         )
@@ -135,15 +166,15 @@ class MyUNSWModule(BaseModule):
 
         try:
             # Try the student class schedule page (PeopleSoft URL)
-            schedule_url = (
-                f"{MYUNSW_BASE}/psc/ps/EMPLOYEE/HRMS/c/"
-                f"SA_LEARNER_SERVICES.SSR_SSENRL_LIST.GBL"
-            )
-            resp = self.client.get(schedule_url)
+            resp = self.client.get(self.ENROLLED_URL)
 
-            # Fallback: try the student centre / home page
+            # Fallback: try the timetable summary page
             if resp.status_code != 200:
-                resp = self.client.get(f"{MYUNSW_BASE}/")
+                resp = self.client.get(self.TIMETABLE_URL)
+
+            # Last fallback: portal root
+            if resp.status_code != 200:
+                resp = self.client.get(f"{MYUNSW_BASE}/portal/")
 
             if resp.status_code != 200:
                 return []

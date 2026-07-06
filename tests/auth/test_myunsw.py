@@ -19,11 +19,11 @@ class TestVerifySession:
     @respx.mock
     def test_valid_session(self, config_with_moodle_cookie):
         """Valid myUNSW session cookies should verify successfully."""
-        # Add a myUNSW cookie (prefixed)
         config_with_moodle_cookie.save_cookies(
             {"myunsw_PS_TOKEN": "fake_session_token"}
         )
-        respx.get(MYUNSW_BASE + "/").mock(
+        # /portal/ returns 200 when authed
+        respx.get(MYUNSW_BASE + "/portal/").mock(
             return_value=httpx.Response(200, text="<html>myUNSW portal</html>")
         )
 
@@ -33,11 +33,12 @@ class TestVerifySession:
     def test_expired_session(self, config_with_moodle_cookie):
         """Session that redirects to login → returns False."""
         config_with_moodle_cookie.save_cookies({"myunsw_PS_TOKEN": "expired_token"})
-        respx.get(MYUNSW_BASE + "/").mock(
+        # /portal/ redirects to CAS login when not authed
+        respx.get(MYUNSW_BASE + "/portal/").mock(
             return_value=httpx.Response(
                 302,
                 text="",
-                headers={"location": MYUNSW_BASE + "/login"},
+                headers={"location": "https://sso.unsw.edu.au/cas/login?service=..."},
             )
         )
         assert verify_session(config_with_moodle_cookie) is False
@@ -46,7 +47,7 @@ class TestVerifySession:
     def test_network_error(self, config_with_moodle_cookie):
         """Network errors → returns False gracefully."""
         config_with_moodle_cookie.save_cookies({"myunsw_PS_TOKEN": "any_token"})
-        respx.get(MYUNSW_BASE + "/").mock(side_effect=httpx.ConnectError("fail"))
+        respx.get(MYUNSW_BASE + "/portal/").mock(side_effect=httpx.ConnectError("fail"))
         assert verify_session(config_with_moodle_cookie) is False
 
 
@@ -64,7 +65,8 @@ class TestLoginWithCookie:
         isolated_config.save_cookies({"myunsw_PS_TOKEN": "session_abc"})
         isolated_config.save_cookies({"myunsw_PS_TOKENEXPIRE": "1234567890"})
 
-        respx.get(MYUNSW_BASE + "/").mock(
+        # /portal/ returns 200 when authed
+        respx.get(MYUNSW_BASE + "/portal/").mock(
             return_value=httpx.Response(200, text="<html>portal</html>")
         )
 
@@ -78,11 +80,12 @@ class TestLoginWithCookie:
         """Expired session → returns None."""
         isolated_config.save_cookies({"myunsw_PS_TOKEN": "expired"})
 
-        respx.get(MYUNSW_BASE + "/").mock(
+        # /portal/ redirects to CAS login when not authed
+        respx.get(MYUNSW_BASE + "/portal/").mock(
             return_value=httpx.Response(
                 302,
                 text="",
-                headers={"location": MYUNSW_BASE + "/login"},
+                headers={"location": "https://sso.unsw.edu.au/cas/login?service=..."},
             )
         )
         client = login_with_cookie(isolated_config)

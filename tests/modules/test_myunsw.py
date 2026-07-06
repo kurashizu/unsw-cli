@@ -6,8 +6,7 @@ import httpx
 import pytest
 import respx
 
-from unsw.auth.myunsw import MYUNSW_BASE
-from unsw.modules.myunsw import MyUNSWModule
+from unsw.modules.myunsw import MYUNSW_BASE, MyUNSWModule
 
 
 class TestMyUNSWCourses:
@@ -16,7 +15,6 @@ class TestMyUNSWCourses:
     @respx.mock
     def test_parses_enrolled_courses(self, config_with_moodle_cookie):
         """Should extract course codes from myUNSW page."""
-        # Need a myUNSW session for the module to authenticate
         config_with_moodle_cookie.save_cookies({"myunsw_PS_TOKEN": "fake_session"})
 
         courses_html = """
@@ -27,7 +25,7 @@ class TestMyUNSWCourses:
             </table>
         </body></html>
         """
-        respx.get(MYUNSW_BASE + "/").mock(
+        respx.get(url__regex=r"my\.unsw\.edu\.au").mock(
             return_value=httpx.Response(200, text=courses_html)
         )
 
@@ -79,14 +77,13 @@ class TestMyUNSWTimetable:
         respx.get(url__regex=r"my\.unsw\.edu\.au.*SSR_SSENRL_LIST").mock(
             return_value=httpx.Response(200, text=timetable_html)
         )
-        respx.get(MYUNSW_BASE + "/").mock(
+        respx.get(MYUNSW_BASE + "/portal/").mock(
             return_value=httpx.Response(200, text="<html>fallback</html>")
         )
 
         module = MyUNSWModule(config_with_moodle_cookie)
         classes = module.get_timetable()
 
-        # Should find at least one class with COMP6733
         assert isinstance(classes, list)
         # Each class dict should have the expected keys
         for cls in classes:

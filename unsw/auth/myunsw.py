@@ -202,7 +202,20 @@ async def _browser_login_flow() -> Optional[dict[str, str]]:
 
 
 async def _verify_session_async(cookies: dict[str, str]) -> bool:
-    """Verify myUNSW session cookies by accessing the student portal."""
+    """Verify myUNSW session cookies by accessing the protected portal URL.
+
+    The root URL https://my.unsw.edu.au/ returns a 200 search page even when
+    not authenticated, so we use /portal/ which redirects to the CAS login
+    page when the user is not signed in.
+    """
+    return _check_session_cookies(cookies)
+
+
+def _check_session_cookies(cookies: dict[str, str]) -> bool:
+    """Synchronous check: are these cookies enough to access the protected portal?
+
+    Returns True if the user has a valid myUNSW session, False otherwise.
+    """
     client = httpx.Client(
         follow_redirects=False,
         timeout=15.0,
@@ -219,11 +232,19 @@ async def _verify_session_async(cookies: dict[str, str]) -> bool:
     )
 
     try:
-        resp = client.get(f"{MYUNSW_BASE}/")
-        # If we get a 200 with non-login content, session is valid
-        if resp.status_code == 200 and "login" not in str(resp.url).lower():
+        # /portal/ redirects to sso.unsw.edu.au/cas/login when not authed.
+        # If we get a 200, the user is signed in.
+        resp = client.get(f"{MYUNSW_BASE}/portal/")
+        if resp.status_code == 200:
             return True
-        # If redirect to login page, session is invalid
+        # Check if redirect goes to a login page
+        location = resp.headers.get("location", "")
+        if "login" in location.lower() or "sso.unsw.edu.au" in location:
+            return False
+        # Any redirect that doesn't go to login means we're authenticated
+        # but being routed somewhere else (still valid)
+        if resp.status_code in (302, 303, 307, 308):
+            return "login" not in location.lower()
         return False
     except Exception:
         return False
@@ -239,27 +260,7 @@ def verify_session(config: Config) -> bool:
     }
     if not myunsw_cookies:
         return False
-
-    client = httpx.Client(
-        follow_redirects=False,
-        timeout=15.0,
-        cookies=myunsw_cookies,
-    )
-    client.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-        }
-    )
-
-    try:
-        resp = client.get(f"{MYUNSW_BASE}/")
-        return resp.status_code == 200 and "login" not in str(resp.url).lower()
-    except Exception:
-        return False
+    return _check_session_cookies(myunsw_cookies)
 
 
 def login_with_cookie(config: Config) -> httpx.Client | None:
@@ -295,13 +296,19 @@ def login_with_cookie(config: Config) -> httpx.Client | None:
 
     # Verify
     try:
-        resp = client.get(f"{MYUNSW_BASE}/", follow_redirects=False)
-        if resp.status_code in (302, 303, 307, 308) or "login" in str(resp.url).lower():
-            print_warning("myUNSW session appears to be expired.")
-            print_warning("Please log in again: unsw myunsw login")
-            return None
-        print_success("myUNSW session authenticated!")
-        return client
+            # /portal/ redirects to sso.unsw.edu.au/cas/login when not authed
+            resp = client.get(f"{MYUNSW_BASE}/portal/", follow_redirects=False)
+            location = resp.headers.get("location", "")
+            if (
+                resp.status_code in (302, 303, 307, 308)
+                or "login" in location.lower()
+                or "sso.unsw.edu.au" in location
+            ):
+                print_warning("myUNSW session appears to be expired.")
+                print_warning("Please log in again: unsw myunsw login")
+                return None
+            print_success("myUNSW session authenticated!")
+            return client
     except Exception as e:
         print_error(f"myUNSW connection error: {e}")
         return None
