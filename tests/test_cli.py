@@ -156,6 +156,50 @@ class TestCLIErrorHandling:
         assert "Invalid" in result.stdout or result.exit_code != 0
 
 
+class TestBrowserErrorHandling:
+    """Test that browser login flows handle missing deps gracefully."""
+
+    def test_missing_playwright_message(self, cli_runner, isolated_config, monkeypatch):
+        """Missing Playwright should print install instructions and exit cleanly."""
+        # Simulate playwright not being installed by patching the import check
+        from unsw.auth import browser as browser_auth
+
+        def fake_check():
+            raise browser_auth.BrowserLoginError(
+                "Playwright is required for browser-based login.\n"
+                "  Install it with:\n"
+                "    uv sync\n"
+                "    uv run playwright install chromium"
+            )
+
+        monkeypatch.setattr(browser_auth, "_check_playwright", fake_check)
+
+        result = cli_runner.invoke(app, ["login", "--platform", "moodle", "--browser"])
+        assert result.exit_code == 0
+        output = result.stdout.lower()
+        assert "playwright" in output
+        assert "install" in output
+
+    def test_missing_chromium_message(self, cli_runner, isolated_config, monkeypatch):
+        """Missing Chromium binary should print install instructions."""
+        from unsw.auth import browser as browser_auth
+
+        def fake_ensure():
+            raise browser_auth.BrowserLoginError(
+                "Chromium browser is not installed.\n"
+                "  Install it with:\n"
+                "    uv run playwright install chromium"
+            )
+
+        monkeypatch.setattr(browser_auth, "_ensure_chromium_installed", fake_ensure)
+
+        result = cli_runner.invoke(app, ["login", "--platform", "moodle", "--browser"])
+        assert result.exit_code == 0
+        output = result.stdout.lower()
+        assert "chromium" in output
+        assert "install" in output
+
+
 class TestLoginPlatformFlag:
     """Test `unsw login --platform <name>` uniform semantics."""
 

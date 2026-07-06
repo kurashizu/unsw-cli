@@ -27,13 +27,18 @@ All-in-one UNSW toolkit — manage Moodle, WebCMS3, myUNSW, Handbook, Timetable 
 # Recommended: zero install with uv
 git clone https://github.com/kurashizu/unsw-cli.git
 cd unsw-cli
+uv sync                          # installs deps including Playwright
+uv run playwright install chromium   # downloads the Chromium browser
 uv run unsw --help
 
 # Or install with pip
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+uv run playwright install chromium
 ```
+
+> **Note**: `playwright` is now a required dependency because the Moodle and myUNSW login flows need browser automation to capture session cookies (both platforms use Azure AD SSO). Run `uv run playwright install chromium` once after install.
 
 ## Quick Start
 

@@ -1133,7 +1133,19 @@ def _do_login(
                 "Open browser to log into Moodle?", default=True
             )
             if moodle_choice:
-                _do_moodle_browser_login()
+                if not _do_moodle_browser_login():
+                    # Browser login failed or was cancelled — give the user
+                    # a chance to skip rather than silently moving on.
+                    print()
+                    print_warning(
+                        "Moodle login did not complete. You can try again later "
+                        "with `unsw login --platform moodle --browser`."
+                    )
+                    skip_remaining = typer.confirm(
+                        "Continue with the remaining platforms?", default=True
+                    )
+                    if not skip_remaining:
+                        return
 
         print()
 
@@ -1159,6 +1171,11 @@ def _do_login(
                 success = login_via_browser(config)
                 if success:
                     print_success("myUNSW login configured!")
+                else:
+                    print_warning(
+                        "myUNSW login did not complete. You can try again later "
+                        "with `unsw login --platform myunsw --browser`."
+                    )
 
         print()
         print_success("Login setup complete!")

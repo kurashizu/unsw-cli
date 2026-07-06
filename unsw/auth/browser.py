@@ -1,7 +1,11 @@
-"""Browser-based Moodle authentication.
+"""Browser-based authentication for SSO-required platforms.
 
-Opens a browser window for the user to log into Moodle via Azure AD SSO,
-then automatically captures the MoodleSession cookie.
+Opens a Chromium window via Playwright, navigates to the platform,
+waits for the user to complete SSO login, and captures the session
+cookie automatically.
+
+Both Moodle and myUNSW use Microsoft Azure AD SSO and share this same
+browser-based approach.
 
 Usage:
     from unsw.auth.browser import moodle_login_via_browser
@@ -24,19 +28,70 @@ POLL_INTERVAL = 1.0  # seconds
 TIMEOUT = 600  # 10 minutes max wait
 
 
-def moodle_login_via_browser(config: Config) -> bool:
-    """Open a browser for Moodle login, capture the cookie automatically.
+class BrowserLoginError(Exception):
+    """Raised when a browser-based login cannot proceed.
 
-    Returns True if successful, False otherwise.
-    The cookie is saved to the config's cookie store on success.
+    This includes missing Playwright, missing Chromium browser, and
+    other infrastructure-level failures (as opposed to user-level
+    failures like cancelling the browser or providing bad credentials).
     """
+
+
+def _check_playwright() -> None:
+    """Verify Playwright is importable, with a helpful error if not."""
     try:
         import playwright  # noqa: F401
     except ImportError:
-        print_error(
+        raise BrowserLoginError(
             "Playwright is required for browser-based login.\n"
-            "Install it with: uv add playwright && uv run playwright install chromium"
+            "  Install it with:\n"
+            "    uv sync\n"
+            "    uv run playwright install chromium"
         )
+
+
+def _ensure_chromium_installed() -> None:
+    """Best-effort check whether the Chromium binary is installed.
+
+    If missing, raise BrowserLoginError with install instructions.
+    """
+    from playwright.sync_api import sync_playwright
+
+    try:
+        with sync_playwright() as p:
+            # Try to find the chromium executable without launching it
+            executable_path = p.chromium.executable_path
+            import os
+
+            if not os.path.exists(executable_path):
+                raise BrowserLoginError(
+                    "Chromium browser is not installed.\n"
+                    "  Install it with:\n"
+                    "    uv run playwright install chromium"
+                )
+    except BrowserLoginError:
+        raise
+    except Exception as e:
+        # If the lookup itself fails, surface a helpful message
+        raise BrowserLoginError(
+            f"Could not verify Chromium installation: {e}\n"
+            "  Try installing it with:\n"
+            "    uv run playwright install chromium"
+        )
+
+
+def moodle_login_via_browser(config: Config) -> bool:
+    """Open a browser for Moodle login, capture the cookie automatically.
+
+    Returns True if successful, False otherwise (including Playwright
+    missing, Chromium missing, user cancellation, or browser error).
+    The cookie is saved to the config's cookie store on success.
+    """
+    try:
+        _check_playwright()
+        _ensure_chromium_installed()
+    except BrowserLoginError as e:
+        print_error(str(e))
         return False
 
     try:
@@ -92,7 +147,8 @@ async def _browser_login_flow() -> Optional[str]:
         except Exception as e:
             print_error(f"Failed to launch browser: {e}")
             print_info(
-                "Make sure Chromium is installed: uv run playwright install chromium"
+                "  If Chromium is missing, install it with:\n"
+                "    uv run playwright install chromium"
             )
             return None
 

@@ -34,12 +34,12 @@ def login_via_browser(config: Config) -> bool:
     Cookies are saved to the config's cookie store on success.
     """
     try:
-        import playwright  # noqa: F401
-    except ImportError:
-        print_error(
-            "Playwright is required for browser-based login.\n"
-            "Install it with: uv add playwright && uv run playwright install chromium"
-        )
+        from unsw.auth.browser import _check_playwright, _ensure_chromium_installed
+
+        _check_playwright()
+        _ensure_chromium_installed()
+    except Exception as e:
+        print_error(str(e))
         return False
 
     try:
