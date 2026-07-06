@@ -1,5 +1,13 @@
 # UNSW CLI
 
+> ⚠️ **Disclaimer**: This is an **unofficial** open-source project created for **learning and reference purposes only**.
+> It is not affiliated with, endorsed by, or officially connected to the University of New South Wales (UNSW) or any of its platforms.
+> Use at your own risk. The authors assume **no responsibility** for any consequences arising from the use of this tool,
+> including but not limited to account suspension, data loss, or violations of university IT policies.
+> By using this software, you agree that you are solely responsible for your actions.
+
+---
+
 All-in-one UNSW toolkit — manage Moodle, WebCMS3, Handbook, Timetable and the Library from your terminal.
 
 ## Installation
