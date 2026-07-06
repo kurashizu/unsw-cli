@@ -32,4 +32,9 @@ browser = [
 packages = ["unsw"]
 
 [dependency-groups]
-dev = []
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-asyncio>=0.23,<1",
+    "pytest-mock>=3.14,<4",
+    "respx>=0.21,<1",
+]

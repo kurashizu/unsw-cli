@@ -145,6 +145,28 @@ unsw-cli/
 │       └── output.py        # Output formatting (Rich tables, JSON)
 ```
 
+## Testing
+
+```bash
+# Install dev dependencies
+uv sync --all-extras
+
+# Run unit + module tests (no network required)
+uv run pytest tests/ --ignore=tests/test_integration.py
+
+# Run integration tests against real UNSW endpoints
+uv run pytest tests/test_integration.py -m network
+
+# Run integration tests that need stored credentials
+uv run pytest tests/test_integration.py -m auth
+```
+
+The test suite includes:
+- **Unit tests** for config persistence, output formatting, and the cookie merge fix
+- **Module tests** using mocked HTTP (`respx`) for all five platform modules
+- **CLI smoke tests** verifying every command parses and runs
+- **Integration tests** against real UNSW servers (Handbook, Timetable, Library)
+
 ## License
 
 MIT

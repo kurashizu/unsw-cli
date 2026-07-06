@@ -130,19 +130,20 @@ def login(config: Config) -> httpx.Client | None:
         resp.raise_for_status()
 
         # Step 3: Check if login succeeded
-        # After successful login, we should be redirected to dashboard
-        if "login" in str(resp.url).lower() and resp.url.path != "/":
-            # Check for error messages in response
-            soup = BeautifulSoup(resp.text, "html.parser")
-            error_elem = soup.select_one(".alert-danger, .error, .alert-error")
-            if error_elem:
-                print_error(f"Login failed: {error_elem.get_text(strip=True)}")
+        # Most reliable check: did the server set a webcms3_session cookie?
+        cookies = dict(client.cookies)
+        if not cookies.get("webcms3_session"):
+            # Fallback: check URL — successful login redirects away from /login
+            if "login" in str(resp.url).lower() and resp.url.path != "/":
+                soup = BeautifulSoup(resp.text, "html.parser")
+                error_elem = soup.select_one(".alert-danger, .error, .alert-error")
+                if error_elem:
+                    print_error(f"Login failed: {error_elem.get_text(strip=True)}")
+                    return None
+                print_error("Login failed - please check your zID and zPass.")
                 return None
-            print_error("Login failed - please check your zID and zPass.")
-            return None
 
         # Save cookies
-        cookies = dict(client.cookies)
         config.save_cookies({"webcms3": cookies.get("webcms3_session", "")})
         print_success("WebCMS3 login successful!")
         return client
