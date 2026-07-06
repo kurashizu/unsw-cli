@@ -139,35 +139,35 @@ def login(
     # ── Single-platform flows (non-interactive) ──────────────
 
     if platform == "moodle":
-        if browser:
-            from unsw.auth.browser import moodle_login_via_browser
+            if browser:
+                from unsw.auth.sso import sso_login_all
 
-            success = moodle_login_via_browser(config)
-            if success:
-                print_success("Moodle login configured!")
-            return
-        if set_cookie:
-            if "=" in set_cookie:
-                key, value = set_cookie.split("=", 1)
-                cookies = config.load_cookies()
-                cookies[key] = value
-                config.save_cookies(cookies)
-                print_success(f"Cookie '{key}' saved")
+                results = sso_login_all(config, platforms=["moodle"])
+                if results.get("moodle"):
+                    print_success("Moodle login configured!")
                 return
-            print_error("Invalid cookie format. Use: Name=Value")
-            raise typer.Exit(code=1)
-        # No browser and no cookie flag → fall through to interactive wizard
-        # for Moodle only
-        print_info("Use --browser to open the Moodle SSO login, or")
-        print_info("use --set-cookie MoodleSession=<value> to set manually.")
-        return
+            if set_cookie:
+                if "=" in set_cookie:
+                    key, value = set_cookie.split("=", 1)
+                    cookies = config.load_cookies()
+                    cookies[key] = value
+                    config.save_cookies(cookies)
+                    print_success(f"Cookie '{key}' saved")
+                    return
+                print_error("Invalid cookie format. Use: Name=Value")
+                raise typer.Exit(code=1)
+            # No browser and no cookie flag → fall through to interactive wizard
+            # for Moodle only
+            print_info("Use --browser to open the Moodle SSO login, or")
+            print_info("use --set-cookie MoodleSession=<value> to set manually.")
+            return
 
     if platform == "myunsw":
         if browser:
-            from unsw.auth.myunsw import login_via_browser
+            from unsw.auth.sso import sso_login_all
 
-            success = login_via_browser(config)
-            if success:
+            results = sso_login_all(config, platforms=["myunsw"])
+            if results.get("myunsw"):
                 print_success("myUNSW login configured!")
             return
         print_info("myUNSW requires browser login. Use --browser.")
@@ -1116,65 +1116,56 @@ def _do_login(
 
         print()
 
-        # ── Step 2: Moodle (cookie / browser) ──
-        print_info("Step 2/3: Moodle (eLearning)")
-        print_info("Moodle uses Microsoft SSO (Azure AD) — browser login.\n")
-
-        if moodle_already_ok:
-            print_success("Moodle session is already valid.")
-            redo = typer.confirm("Re-login to Moodle?", default=False)
-            if not redo:
-                print_info("  Skipping Moodle.\n")
-            else:
-                moodle_already_ok = False
+        # ── Steps 2 & 3: Unified SSO login (Moodle + myUNSW) ──
+        # Both use Azure AD SSO, so we open the browser ONCE and walk through
+        # both logins sequentially. The Azure AD session token is shared
+        # between the two redirects, so subsequent logins are faster.
+        sso_platforms_needed: list[str] = []
 
         if not moodle_already_ok:
-            moodle_choice = typer.confirm(
-                "Open browser to log into Moodle?", default=True
-            )
-            if moodle_choice:
-                if not _do_moodle_browser_login():
-                    # Browser login failed or was cancelled — give the user
-                    # a chance to skip rather than silently moving on.
-                    print()
-                    print_warning(
-                        "Moodle login did not complete. You can try again later "
-                        "with `unsw login --platform moodle --browser`."
-                    )
-                    skip_remaining = typer.confirm(
-                        "Continue with the remaining platforms?", default=True
-                    )
-                    if not skip_remaining:
-                        return
-
-        print()
-
-        # ── Step 3: myUNSW (browser) ──
-        print_info("Step 3/3: myUNSW (course enrolment)")
-        print_info("myUNSW uses Microsoft SSO (Azure AD) — browser login.\n")
-
-        if myunsw_already_ok:
-            print_success("myUNSW session is already valid.")
-            redo = typer.confirm("Re-login to myUNSW?", default=False)
-            if not redo:
-                print_info("  Skipping myUNSW.\n")
-            else:
-                myunsw_already_ok = False
+            sso_platforms_needed.append("moodle")
+        else:
+            print_info("Step 2/3: Moodle — already logged in")
 
         if not myunsw_already_ok:
-            myunsw_choice = typer.confirm(
-                "Open browser to log into myUNSW?", default=True
-            )
-            if myunsw_choice:
-                from unsw.auth.myunsw import login_via_browser
+            sso_platforms_needed.append("myunsw")
+        else:
+            print_info("Step 3/3: myUNSW — already logged in")
 
-                success = login_via_browser(config)
-                if success:
-                    print_success("myUNSW login configured!")
-                else:
+        if sso_platforms_needed:
+            names = "/".join(p.title() for p in sso_platforms_needed)
+            print_info(
+                f"Step 2/3 + 3/3: Unified SSO login for {names}"
+            )
+            print_info(
+                "Both Moodle and myUNSW use Microsoft Azure AD SSO.\n"
+                "We'll open the browser ONCE — log into each in turn.\n"
+            )
+
+            redo_choice = typer.confirm(
+                "Open browser for SSO login?", default=True
+            )
+            if redo_choice:
+                from unsw.auth.sso import sso_login_all
+
+                results = sso_login_all(config, platforms=sso_platforms_needed)
+                # Update the *_already_ok flags based on results
+                if results.get("moodle"):
+                    moodle_already_ok = True
+                if results.get("myunsw"):
+                    myunsw_already_ok = True
+
+                # If any platform failed, let the user know how to retry
+                failed = [p for p in sso_platforms_needed if not results.get(p)]
+                if failed:
+                    print()
                     print_warning(
-                        "myUNSW login did not complete. You can try again later "
-                        "with `unsw login --platform myunsw --browser`."
+                        f"Login did not complete for: {', '.join(failed)}.\n"
+                        "  You can retry later with:\n"
+                        + "\n".join(
+                            f"    unsw login --platform {p} --browser"
+                            for p in failed
+                        )
                     )
 
         print()
@@ -1218,16 +1209,15 @@ def _do_login(
 # ──────────────────────────────────────────────
 
 
-def _do_moodle_browser_login() -> None:
-    """Helper: open browser for Moodle login."""
+def _do_moodle_browser_login() -> bool:
+    """Helper: open browser for Moodle login.
+
+    Returns True on success, False on failure/cancellation.
+    """
     from unsw.auth.browser import moodle_login_via_browser
 
     config = Config()
-    success = moodle_login_via_browser(config)
-    if success:
-        print_success("Moodle login configured!")
-    else:
-        print_warning("Moodle login cancelled or failed.")
+    return moodle_login_via_browser(config)
 
 
 def main():

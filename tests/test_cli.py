@@ -161,18 +161,18 @@ class TestBrowserErrorHandling:
 
     def test_missing_playwright_message(self, cli_runner, isolated_config, monkeypatch):
         """Missing Playwright should print install instructions and exit cleanly."""
-        # Simulate playwright not being installed by patching the import check
-        from unsw.auth import browser as browser_auth
+        from unsw.auth import sso as sso_auth
+        from unsw.auth.browser import BrowserLoginError
 
         def fake_check():
-            raise browser_auth.BrowserLoginError(
+            raise BrowserLoginError(
                 "Playwright is required for browser-based login.\n"
                 "  Install it with:\n"
                 "    uv sync\n"
                 "    uv run playwright install chromium"
             )
 
-        monkeypatch.setattr(browser_auth, "_check_playwright", fake_check)
+        monkeypatch.setattr(sso_auth, "_check_playwright", fake_check)
 
         result = cli_runner.invoke(app, ["login", "--platform", "moodle", "--browser"])
         assert result.exit_code == 0
@@ -182,16 +182,17 @@ class TestBrowserErrorHandling:
 
     def test_missing_chromium_message(self, cli_runner, isolated_config, monkeypatch):
         """Missing Chromium binary should print install instructions."""
-        from unsw.auth import browser as browser_auth
+        from unsw.auth import sso as sso_auth
+        from unsw.auth.browser import BrowserLoginError
 
         def fake_ensure():
-            raise browser_auth.BrowserLoginError(
+            raise BrowserLoginError(
                 "Chromium browser is not installed.\n"
                 "  Install it with:\n"
                 "    uv run playwright install chromium"
             )
 
-        monkeypatch.setattr(browser_auth, "_ensure_chromium_installed", fake_ensure)
+        monkeypatch.setattr(sso_auth, "_ensure_chromium_installed", fake_ensure)
 
         result = cli_runner.invoke(app, ["login", "--platform", "moodle", "--browser"])
         assert result.exit_code == 0
@@ -339,20 +340,24 @@ class TestLoginPlatformFlag:
     def test_login_inferred_platform_browser(
         self, cli_runner, isolated_config, monkeypatch
     ):
-        """`unsw login --browser` should infer --platform moodle."""
-        from unsw.auth import browser as browser_auth
+        def test_login_inferred_platform_browser(
+            self, cli_runner, isolated_config, monkeypatch
+        ):
+            """`unsw login --browser` should infer --platform moodle."""
+            from unsw.auth import sso as sso_auth
 
-        # Mock the browser flow so we don't actually open a browser
-        called = []
-        monkeypatch.setattr(
-            browser_auth,
-            "moodle_login_via_browser",
-            lambda c: called.append(True) or True,
-        )
+            # Mock the SSO flow so we don't actually open a browser
+            called = []
+            monkeypatch.setattr(
+                sso_auth,
+                "sso_login_all",
+                lambda c, platforms=None: called.append(platforms) or {"moodle": True},
+            )
 
-        result = cli_runner.invoke(app, ["login", "--browser"])
-        # Should have called the browser flow
-        assert len(called) == 1
+            result = cli_runner.invoke(app, ["login", "--browser"])
+            # Should have called the SSO flow
+            assert len(called) == 1
+            assert "moodle" in called[0]
 
     def test_login_deprecation_hints(self, cli_runner, isolated_config, monkeypatch):
         """Setting UNSW_CLI_SHOW_DEPRECATION=1 should print deprecation hints."""
