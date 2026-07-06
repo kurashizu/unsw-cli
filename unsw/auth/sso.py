@@ -115,8 +115,14 @@ async def _wait_for_moodle_login(context) -> Optional[str]:
     return None
 
 
-async def _wait_for_myunsw_login(context) -> Optional[dict[str, str]]:
-    """Wait for user to complete myUNSW SSO, return the verified session cookies."""
+async def _wait_for_myunsw_login(context, page) -> Optional[dict[str, str]]:
+    """Wait for user to complete myUNSW SSO, return the verified session cookies.
+
+    Strategy: navigate the browser to /portal/ and check whether we end up
+    on the dashboard (not on a CAS or Microsoft login page). The browser
+    carries all SSO cookies automatically, so this works reliably across
+    the multi-domain auth chain.
+    """
     print_info("  1. Wait for the myUNSW page to load")
     print_info("  2. Log in with your UNSW zID and password (Azure AD SSO)")
     print_info("  3. If prompted, complete MFA")
@@ -125,41 +131,68 @@ async def _wait_for_myunsw_login(context) -> Optional[dict[str, str]]:
 
     start_time = time.time()
     captured = None
+    poll_count = 0
 
     while time.time() - start_time < TIMEOUT:
+        poll_count += 1
         try:
-            all_cookies = await context.cookies()
+            # Navigate the browser to /portal/ — this carries all the
+            # SSO cookies across domains automatically. If the user is
+            # logged in, we'll land on the dashboard (200).
+            await page.goto(
+                f"{MYUNSW_URL}/portal/",
+                wait_until="domcontentloaded",
+                timeout=10000,
+            )
+            current_url = page.url.lower()
+            page_title = (await page.title()).lower()
 
-            # Collect both myUNSW-domain cookies AND any SSO cookies
-            # (Azure AD cookies are scoped to login.microsoftonline.com but
-            # they're needed to make authenticated requests back to myUNSW)
-            cookies = {}
-            for c in all_cookies:
-                domain = c.get("domain", "")
-                name = c["name"]
-                value = c.get("value", "")
-                if not value:
-                    continue
-                # Include any cookie that might be relevant
-                if (
-                    "my.unsw.edu.au" in domain
-                    or "unsw.edu.au" in domain
-                    or name in MYUNSW_COOKIE_NAMES
-                    or name in SSO_COOKIE_NAMES
-                ):
-                    cookies[name] = value
+            # If we're on the dashboard, we have a session
+            is_dashboard = (
+                "login" not in current_url
+                and "sso.unsw.edu.au" not in current_url
+                and "microsoftonline" not in current_url
+                and "sign in" not in page_title
+                and "log in" not in page_title
+            )
 
-            if cookies:
-                if await _verify_myunsw_session(cookies):
-                    captured = cookies
-                    print_info("  ✅ myUNSW session verified!")
-                    return captured
-                else:
-                    if captured is None:
-                        captured = {}
-                        print_info("  ⏳ Waiting for myUNSW login to complete...")
+            if is_dashboard:
+                # Capture all cookies now that we know the session is valid
+                all_cookies = await context.cookies()
+                cookies = {}
+                for c in all_cookies:
+                    domain = c.get("domain", "")
+                    name = c["name"]
+                    value = c.get("value", "")
+                    if not value:
+                        continue
+                    # Include myUNSW and SSO cookies
+                    if (
+                        "my.unsw.edu.au" in domain
+                        or "unsw.edu.au" in domain
+                        or "microsoftonline" in domain
+                        or name in MYUNSW_COOKIE_NAMES
+                        or name in SSO_COOKIE_NAMES
+                    ):
+                        cookies[name] = value
 
-        except Exception:
+                captured = cookies
+                print_info("  ✅ myUNSW session verified!")
+                return captured
+
+            # Show waiting message once
+            if captured is None:
+                captured = {}  # Mark message shown
+                print_info("  ⏳ Waiting for myUNSW login to complete...")
+
+            # Heartbeat every 30s
+            if poll_count % 30 == 0:
+                elapsed = int(time.time() - start_time)
+                print_info(f"  Still waiting... ({elapsed}s elapsed)")
+
+        except Exception as e:
+            # Navigation can fail while SSO is redirecting — that's OK
+            # print_info(f"  (Navigation: {e})")
             pass
 
         await asyncio.sleep(POLL_INTERVAL)
@@ -244,7 +277,7 @@ async def _sso_login_flow(config: Config, platforms: list[str]) -> dict[str, boo
                 except Exception as e:
                     print_info(f"  (Navigation note: {e})")
 
-                session_cookies = await _wait_for_myunsw_login(context)
+                session_cookies = await _wait_for_myunsw_login(context, page)
                 if session_cookies:
                     # Save with myunsw_ prefix to namespace them
                     all_cookies = config.load_cookies()
