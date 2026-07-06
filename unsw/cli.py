@@ -824,6 +824,40 @@ def drop(code: str):
 
 
 @myunsw_app.command()
+def timetable(json_output: bool = typer.Option(False, "--json", help="Output as JSON")):
+    """📅 View your personal class timetable from myUNSW.
+
+    Shows your enrolled classes with days, times and locations
+    as recorded in myUNSW (not the public timetable).
+    """
+    from unsw.modules.myunsw import MyUNSWModule
+
+    config = Config()
+    module = MyUNSWModule(config)
+    if not module.client:
+        return
+
+    with console.status("Fetching your class timetable..."):
+        result = module.get_timetable()
+
+    if not result:
+        print_info(
+            "Could not fetch timetable from myUNSW.\n"
+            "Opening myUNSW in your browser as fallback..."
+        )
+        module.open_timetable_page()
+        return
+
+    fmt = "json" if json_output else "table"
+    format_output(
+        result,
+        columns=["code", "activity", "section", "day", "time", "location", "weeks"],
+        title="My Class Timetable",
+        output_format=fmt,
+    )
+
+
+@myunsw_app.command()
 def open():
     """🌐 Open myUNSW in your browser."""
     from unsw.modules.myunsw import MyUNSWModule

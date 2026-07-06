@@ -119,6 +119,163 @@ class MyUNSWModule(BaseModule):
         print_info("Navigate to: Student Portal → Enrolment → Class Search")
         return url
 
+    # ── Personal Timetable (from myUNSW enrolment) ───────────
+
+    def get_timetable(self) -> list[dict[str, Any]]:
+        """Get personal class timetable from myUNSW enrolment data.
+
+        Scrapes the student's enrolled class schedule, showing
+        when and where each class meets.
+
+        Returns a list of dicts with keys: code, activity, section,
+        day, time, location, weeks.
+        """
+        if not self.client:
+            return []
+
+        try:
+            # Try the student class schedule page (PeopleSoft URL)
+            schedule_url = (
+                f"{MYUNSW_BASE}/psc/ps/EMPLOYEE/HRMS/c/"
+                f"SA_LEARNER_SERVICES.SSR_SSENRL_LIST.GBL"
+            )
+            resp = self.client.get(schedule_url)
+
+            # Fallback: try the student centre / home page
+            if resp.status_code != 200:
+                resp = self.client.get(f"{MYUNSW_BASE}/")
+
+            if resp.status_code != 200:
+                return []
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            classes = []
+            seen = set()
+
+            # Strategy 1: Look for the standard enrolment schedule table
+            # PeopleSoft uses tables with ids like SSR_SSENRL_LIST_* or similar
+            for table in soup.select(
+                "table[id*='SSR_SSENRL_LIST'], "
+                "table[id*='CLASS_SRCH'], "
+                "table[id*='ENRL_LIST'], "
+                "table[class*='psc-table'], "
+                "table[summary*='schedule'], "
+                "table[summary*='class'], "
+                ".ps_box-scroll table"
+            ):
+                rows = table.find_all("tr")
+                for row in rows:
+                    cells = row.find_all("td")
+                    if len(cells) < 5:
+                        continue
+
+                    text = row.get_text(strip=True)
+                    # Ensure it has a course code
+                    codes = re.findall(r"[A-Z]{4}\d{4}", text)
+                    if not codes:
+                        continue
+
+                    code = codes[0]
+                    # Build dedup key
+                    cells_text = [c.get_text(strip=True) for c in cells]
+                    dedup_key = "|".join(cells_text[:6])
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+
+                    # Extract fields (PeopleSoft column order varies)
+                    # Typical order: section, activity, day, time, location, instructor, weeks
+                    section = cells[0].get_text(strip=True) if len(cells) > 0 else ""
+                    activity = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                    day = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                    time = cells[3].get_text(strip=True) if len(cells) > 3 else ""
+                    location = cells[4].get_text(strip=True) if len(cells) > 4 else ""
+                    instructor = cells[5].get_text(strip=True) if len(cells) > 5 else ""
+                    weeks = cells[6].get_text(strip=True) if len(cells) > 6 else ""
+
+                    classes.append(
+                        {
+                            "code": code,
+                            "section": section,
+                            "activity": activity,
+                            "day": day,
+                            "time": time,
+                            "location": location,
+                            "instructor": instructor,
+                            "weeks": weeks,
+                        }
+                    )
+
+            # Strategy 2: Look for course/class info blocks (if no table found)
+            if not classes:
+                for block in soup.select(
+                    "[class*='course'], [class*='class'], "
+                    "[id*='course'], [id*='class'], "
+                    ".ps_box-group, [class*='enrollment']"
+                ):
+                    text = block.get_text(strip=True)
+                    codes = re.findall(r"[A-Z]{4}\d{4}", text)
+                    if not codes:
+                        continue
+
+                    code = codes[0]
+                    if code in seen:
+                        continue
+                    seen.add(code)
+
+                    # Try to extract day/time from text
+                    day = ""
+                    time = ""
+                    location = ""
+                    activity = ""
+
+                    day_match = re.search(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun)", text)
+                    if day_match:
+                        day = day_match.group(1)
+
+                    time_match = re.search(
+                        r"(\d{1,2}:\d{2}\s*(?:am|pm)\s*-\s*\d{1,2}:\d{2}\s*(?:am|pm))",
+                        text,
+                        re.IGNORECASE,
+                    )
+                    if time_match:
+                        time = time_match.group(1)
+
+                    loc_match = re.search(r"([A-Z][a-z]+\s+\d+)", text)
+                    if loc_match:
+                        location = loc_match.group(1)
+
+                    classes.append(
+                        {
+                            "code": code,
+                            "section": "",
+                            "activity": activity,
+                            "day": day,
+                            "time": time,
+                            "location": location,
+                            "instructor": "",
+                            "weeks": "",
+                        }
+                    )
+
+            return classes
+
+        except Exception:
+            return []
+
+    def open_timetable_page(self) -> str:
+        """Open the myUNSW timetable / class schedule page in the user's browser.
+
+        Returns the URL that was opened.
+        """
+        url = (
+            f"{MYUNSW_BASE}/psc/ps/EMPLOYEE/HRMS/c/"
+            f"SA_LEARNER_SERVICES.SSR_SSENRL_LIST.GBL"
+        )
+        webbrowser.open(url)
+        print_info(f"Opened myUNSW class schedule in your browser.")
+        return url
+
     # ── Class Search (scraped) ───────────────────────────────
 
     def search_classes(self, course_code: str) -> list[dict[str, Any]]:
