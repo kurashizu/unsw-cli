@@ -8,6 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from unsw.cli import app
+from unsw.config import Config
 
 
 class TestCLIBasics:
@@ -153,3 +154,169 @@ class TestCLIErrorHandling:
         result = cli_runner.invoke(app, ["login", "--set-cookie", "noequals"])
         # Should fail gracefully
         assert "Invalid" in result.stdout or result.exit_code != 0
+
+
+class TestLoginPlatformFlag:
+    """Test `unsw login --platform <name>` uniform semantics."""
+
+    def test_login_platform_invalid_value(self, cli_runner, isolated_config):
+        """Invalid --platform value should error with a clear message."""
+        result = cli_runner.invoke(app, ["login", "--platform", "facebook"])
+        assert result.exit_code == 1
+        assert "Invalid" in result.stdout or "invalid" in result.stdout.lower()
+
+    def test_login_platform_webcms3_saves_credentials(
+        self, cli_runner, isolated_config, monkeypatch
+    ):
+        """`unsw login --platform webcms3 --zid X --zpass Y` should save."""
+        # Skip the actual verify_credentials network call by mocking it
+        from unsw.auth import webcms3 as webcms3_auth
+
+        monkeypatch.setattr(webcms3_auth, "verify_credentials", lambda z, p: True)
+
+        result = cli_runner.invoke(
+            app,
+            [
+                "login",
+                "--platform",
+                "webcms3",
+                "--zid",
+                "z9999999",
+                "--zpass",
+                "secret",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "WebCMS3 credentials saved" in result.stdout
+        assert "verified" in result.stdout
+
+    def test_login_platform_webcms3_save_then_reload(
+        self, cli_runner, isolated_config, monkeypatch
+    ):
+        """Saved credentials should be reloadable via Config()."""
+        from unsw.auth import webcms3 as webcms3_auth
+
+        monkeypatch.setattr(webcms3_auth, "verify_credentials", lambda z, p: True)
+
+        cli_runner.invoke(
+            app,
+            [
+                "login",
+                "--platform",
+                "webcms3",
+                "--zid",
+                "z9999999",
+                "--zpass",
+                "secret",
+            ],
+        )
+        # Re-load config from disk
+        config = Config()
+        assert config.auth.zid == "z9999999"
+        assert config.auth.zpass == "secret"
+
+    def test_login_platform_webcms3_invalid_creds(
+        self, cli_runner, isolated_config, monkeypatch
+    ):
+        """Bad credentials should warn but still save."""
+        from unsw.auth import webcms3 as webcms3_auth
+
+        monkeypatch.setattr(webcms3_auth, "verify_credentials", lambda z, p: False)
+
+        result = cli_runner.invoke(
+            app,
+            [
+                "login",
+                "--platform",
+                "webcms3",
+                "--zid",
+                "z9999999",
+                "--zpass",
+                "wrong",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "failed" in result.stdout.lower() or "Check" in result.stdout
+
+    def test_login_platform_moodle_set_cookie(self, cli_runner, isolated_config):
+        """`unsw login --platform moodle --set-cookie X=Y` should save."""
+        result = cli_runner.invoke(
+            app,
+            [
+                "login",
+                "--platform",
+                "moodle",
+                "--set-cookie",
+                "MoodleSession=fakevalue123",
+            ],
+        )
+        assert result.exit_code == 0
+        cookies = isolated_config.load_cookies()
+        assert cookies.get("MoodleSession") == "fakevalue123"
+
+    def test_login_platform_moodle_set_cookie_bad_format(
+        self, cli_runner, isolated_config
+    ):
+        """Bad cookie format should error out."""
+        result = cli_runner.invoke(
+            app,
+            ["login", "--platform", "moodle", "--set-cookie", "noequals"],
+        )
+        assert result.exit_code == 1
+        assert "Invalid" in result.stdout
+
+    def test_login_platform_myunsw_without_browser(self, cli_runner, isolated_config):
+        """myUNSW without --browser should print a hint."""
+        result = cli_runner.invoke(app, ["login", "--platform", "myunsw"])
+        assert "browser" in result.stdout.lower()
+
+    def test_login_inferred_platform_zid(
+        self, cli_runner, isolated_config, monkeypatch
+    ):
+        """`unsw login --zid X --zpass Y` should infer --platform webcms3."""
+        from unsw.auth import webcms3 as webcms3_auth
+
+        monkeypatch.setattr(webcms3_auth, "verify_credentials", lambda z, p: True)
+
+        result = cli_runner.invoke(
+            app,
+            [
+                "login",
+                "--zid",
+                "z9999999",
+                "--zpass",
+                "secret",
+            ],
+        )
+        # Should have saved WebCMS3 credentials
+        config = Config()
+        assert config.auth.zid == "z9999999"
+
+    def test_login_inferred_platform_browser(
+        self, cli_runner, isolated_config, monkeypatch
+    ):
+        """`unsw login --browser` should infer --platform moodle."""
+        from unsw.auth import browser as browser_auth
+
+        # Mock the browser flow so we don't actually open a browser
+        called = []
+        monkeypatch.setattr(
+            browser_auth,
+            "moodle_login_via_browser",
+            lambda c: called.append(True) or True,
+        )
+
+        result = cli_runner.invoke(app, ["login", "--browser"])
+        # Should have called the browser flow
+        assert len(called) == 1
+
+    def test_login_deprecation_hints(self, cli_runner, isolated_config, monkeypatch):
+        """Setting UNSW_CLI_SHOW_DEPRECATION=1 should print deprecation hints."""
+        import os
+
+        monkeypatch.setenv("UNSW_CLI_SHOW_DEPRECATION", "1")
+
+        # Try the auth login alias
+        result = cli_runner.invoke(app, ["auth", "login"])
+        # Should mention "Deprecated"
+        assert "Deprecated" in result.stdout or result.exit_code != 0

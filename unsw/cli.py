@@ -63,48 +63,144 @@ app.add_typer(myunsw_app, name="myunsw")
 
 @app.command()
 def login(
+    platform: Optional[str] = typer.Option(
+        None,
+        "--platform",
+        "-p",
+        help="Target platform: 'moodle', 'webcms3', 'myunsw' or 'all' (default)",
+        case_sensitive=False,
+    ),
     zid: Optional[str] = typer.Option(None, "--zid", help="Your zID (e.g. z5123456)"),
     zpass: Optional[str] = typer.Option(
         None, "--zpass", help="Your zPass", hide_input=True
     ),
     set_cookie: Optional[str] = typer.Option(
-        None, "--set-cookie", help="Set a cookie (e.g. MoodleSession=abc123)"
+        None, "--set-cookie", help="Set a MoodleSession cookie (Name=Value)"
     ),
     browser: bool = typer.Option(
         False,
         "--browser",
-        help="Open browser to log into Moodle via SSO (auto-capture cookie)",
+        help="Open browser for SSO login (auto-capture cookie)",
     ),
     show: bool = typer.Option(False, "--show", help="Show current configuration"),
 ):
-    """ Configure authentication for UNSW platforms.
+    """🔐 Log into one or all UNSW platforms.
 
-    Without any options, runs the interactive wizard to log into all platforms.
+    Without --platform, runs the interactive wizard for all platforms.
+    Use --platform to target a specific one.
+
+    Platform-specific notes:
+    - moodle / myunsw: require Azure AD SSO — use --browser
+    - webcms3: requires zID + zPass — use --zid and --zpass
 
     Examples:
 
-    # Interactive wizard (recommended - logs into all platforms):
+    # Interactive wizard (recommended):
     unsw login
 
-    # Browser-based Moodle login (auto-capture cookie):
-    unsw login --browser
+    # Log into one platform:
+    unsw login --platform moodle --browser
+    unsw login --platform myunsw --browser
+    unsw login --platform webcms3 --zid z5530104 --zpass secret
 
-    # WebCMS3 with zID/zPass:
-    unsw login --zid z5530104 --zpass yourpassword
+    # Log into all authed platforms (skips already-authed ones):
+    unsw login --platform all
 
-    # Set MoodleSession cookie manually:
-    unsw login --set-cookie MoodleSession=abc123
+    # Manually set a MoodleSession cookie:
+    unsw login --platform moodle --set-cookie MoodleSession=abc123
 
-    # View current configuration:
+    # Show current config:
     unsw login --show
     """
-    if browser:
-        from unsw.auth.browser import moodle_login_via_browser
+    config = Config()
 
-        config = Config()
-        success = moodle_login_via_browser(config)
-        if success:
-            print_success("Moodle login configured!")
+    # Normalize --platform value
+    if platform is not None:
+        platform = platform.lower().strip()
+    valid_platforms = {"moodle", "webcms3", "myunsw", "all"}
+    if platform is not None and platform not in valid_platforms:
+        print_error(
+            f"Invalid --platform '{platform}'. "
+            f"Must be one of: {', '.join(sorted(valid_platforms))}"
+        )
+        raise typer.Exit(code=1)
+
+    # If no --platform specified but other flags given, infer the platform.
+    # This preserves backward compatibility: `unsw login --browser` → moodle,
+    # `unsw login --zid ... --zpass ...` → webcms3.
+    if platform is None:
+        if zid or zpass:
+            platform = "webcms3"
+        elif browser or set_cookie:
+            platform = "moodle"
+        else:
+            platform = "all"  # Interactive wizard
+
+    # ── Single-platform flows (non-interactive) ──────────────
+
+    if platform == "moodle":
+        if browser:
+            from unsw.auth.browser import moodle_login_via_browser
+
+            success = moodle_login_via_browser(config)
+            if success:
+                print_success("Moodle login configured!")
+            return
+        if set_cookie:
+            if "=" in set_cookie:
+                key, value = set_cookie.split("=", 1)
+                cookies = config.load_cookies()
+                cookies[key] = value
+                config.save_cookies(cookies)
+                print_success(f"Cookie '{key}' saved")
+                return
+            print_error("Invalid cookie format. Use: Name=Value")
+            raise typer.Exit(code=1)
+        # No browser and no cookie flag → fall through to interactive wizard
+        # for Moodle only
+        print_info("Use --browser to open the Moodle SSO login, or")
+        print_info("use --set-cookie MoodleSession=<value> to set manually.")
+        return
+
+    if platform == "myunsw":
+        if browser:
+            from unsw.auth.myunsw import login_via_browser
+
+            success = login_via_browser(config)
+            if success:
+                print_success("myUNSW login configured!")
+            return
+        print_info("myUNSW requires browser login. Use --browser.")
+        return
+
+    if platform == "webcms3":
+        if zid:
+            config.auth.zid = zid
+        if zpass:
+            config.auth.zpass = zpass
+        if zid or zpass:
+            config.save()
+            from unsw.auth.webcms3 import verify_credentials
+
+            print_success("WebCMS3 credentials saved.")
+            if config.auth.zid and config.auth.zpass:
+                print_info("Verifying WebCMS3...")
+                ok = verify_credentials(config.auth.zid, config.auth.zpass)
+                if ok:
+                    print_success("WebCMS3 login verified!")
+                else:
+                    print_warning("WebCMS3 login failed. Check your zID and zPass.")
+            return
+        if show:
+            _show_config(config)
+            return
+        # No flags → prompt for zID/zPass interactively
+        _do_login(zid, zpass, set_cookie, show)
+        return
+
+    # platform == "all" (or unspecified with no inferred flags)
+    if show:
+        _show_config(config)
         return
     _do_login(zid, zpass, set_cookie, show)
 
@@ -256,8 +352,10 @@ def auth_login(
 ):
     """ Configure authentication for UNSW platforms.
 
-    Without any options, runs the interactive wizard to log into all platforms.
+    [DEPRECATED] Prefer `unsw login` (works the same way).
+    Use `unsw login --platform <name>` to target a specific platform.
     """
+    _deprecation_hint("unsw auth login", "unsw login")
     if browser:
         from unsw.auth.browser import moodle_login_via_browser
 
@@ -273,9 +371,11 @@ def auth_login(
 def login_moodle():
     """🌐 Open browser to log into Moodle and auto-capture cookie.
 
-    This will open a browser window. Log in with your UNSW account,
-    and the CLI will automatically capture your MoodleSession cookie.
+    [DEPRECATED] Prefer `unsw login --platform moodle --browser`.
     """
+    _deprecation_hint(
+        "unsw auth login-moodle", "unsw login --platform moodle --browser"
+    )
     from unsw.auth.browser import moodle_login_via_browser
 
     config = Config()
@@ -709,9 +809,9 @@ def links():
 def login():
     """🎓 Log into myUNSW via browser (auto-capture session).
 
-    Opens a browser for Azure AD SSO login and automatically
-    captures the myUNSW session cookies.
+    [DEPRECATED] Prefer `unsw login --platform myunsw --browser`.
     """
+    _deprecation_hint("unsw myunsw login", "unsw login --platform myunsw --browser")
     from unsw.auth.myunsw import login_via_browser
 
     config = Config()
@@ -869,6 +969,15 @@ def open():
 # ──────────────────────────────────────────────
 # Utility functions
 # ──────────────────────────────────────────────
+
+
+def _deprecation_hint(old: str, new: str) -> None:
+    """Print a one-line deprecation hint to stderr for an alias command."""
+    import os
+
+    # Gated by env var so the message doesn't spam real users by default
+    if os.environ.get("UNSW_CLI_SHOW_DEPRECATION"):
+        print_warning(f"Deprecated: `{old}` — use `{new}` instead.")
 
 
 def _show_config(config: Config) -> None:

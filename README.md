@@ -29,13 +29,12 @@ pip install -e .
 # View help
 uv run unsw --help
 
-# One-click Moodle login (opens browser, auto-captures cookie)
-uv run unsw login --browser
+# Log into a specific platform (uniform `--platform` syntax):
+uv run unsw login --platform moodle --browser      # Moodle via SSO
+uv run unsw login --platform myunsw --browser      # myUNSW via SSO
+uv run unsw login --platform webcms3 --zid z5123456 --zpass yourpassword
 
-# WebCMS3 login
-uv run unsw login --zid z5123456 --zpass yourpassword
-
-# Interactive wizard — log into all platforms
+# Interactive wizard — log into all platforms (skips already-authed):
 uv run unsw login
 
 # Check authentication status for all platforms
@@ -77,13 +76,23 @@ uv run unsw webcms3 courses
 
 ## Authentication
 
+The CLI uses a uniform `--platform` flag for logging into any platform:
+
+```bash
+# Log into a single platform
+uv run unsw login --platform moodle  --browser
+uv run unsw login --platform myunsw  --browser
+uv run unsw login --platform webcms3 --zid z5123456 --zpass yourpassword
+
+# Log into all platforms (interactive wizard, skips already-authed):
+uv run unsw login
+uv run unsw login --platform all
+```
+
 ### Moodle (Browser auto-login — recommended)
 
 ```bash
-# Single command: browser opens → you log in via SSO → cookie captured automatically
-uv run unsw login --browser
-# or
-uv run unsw auth login-moodle
+uv run unsw login --platform moodle --browser
 ```
 
 Moodle uses Azure AD SSO (Microsoft login) and does **not** support direct zID+zPass login. UNSW has not enabled the Moodle REST API, so the only way to authenticate is via the `MoodleSession` cookie.
@@ -95,14 +104,29 @@ Moodle uses Azure AD SSO (Microsoft login) and does **not** support direct zID+z
 # 2. Open DevTools (F12) → Application → Cookies → moodle.telt.unsw.edu.au
 # 3. Copy the MoodleSession cookie value
 # 4. Set it with:
-uv run unsw login --set-cookie MoodleSession=<paste-value>
+uv run unsw login --platform moodle --set-cookie MoodleSession=<paste-value>
 ```
 
 ### WebCMS3
 
 ```bash
-uv run unsw login --zid z5123456 --zpass yourpassword
+uv run unsw login --platform webcms3 --zid z5123456 --zpass yourpassword
 ```
+
+### Backward compatibility
+
+The legacy commands still work but print a deprecation hint:
+
+| Old command | New command |
+|---|---|
+| `unsw login --browser` | `unsw login --platform moodle --browser` |
+| `unsw login --zid X --zpass Y` | `unsw login --platform webcms3 --zid X --zpass Y` |
+| `unsw login --set-cookie X=Y` | `unsw login --platform moodle --set-cookie X=Y` |
+| `unsw auth login` | `unsw login` |
+| `unsw auth login-moodle` | `unsw login --platform moodle --browser` |
+| `unsw myunsw login` | `unsw login --platform myunsw --browser` |
+
+Set `UNSW_CLI_SHOW_DEPRECATION=1` to see the deprecation hints.
 
 ### Check Authentication Status
 
