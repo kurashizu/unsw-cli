@@ -118,81 +118,64 @@ async def _wait_for_moodle_login(context) -> Optional[str]:
 async def _wait_for_myunsw_login(context, page) -> Optional[dict[str, str]]:
     """Wait for user to complete myUNSW SSO, return the verified session cookies.
 
-    Strategy: navigate the browser to /portal/ and check whether we end up
-    on the dashboard (not on a CAS or Microsoft login page). The browser
-    carries all SSO cookies automatically, so this works reliably across
-    the multi-domain auth chain.
+    Strategy: poll the browser's cookies without navigating the page.
+    After Azure AD login, myUNSW (PeopleSoft) sets a PS_TOKEN cookie on
+    my.unsw.edu.au. We watch for that cookie and treat its presence as
+    proof of a successful login.
     """
     print_info("  1. Wait for the myUNSW page to load")
     print_info("  2. Log in with your UNSW zID and password (Azure AD SSO)")
     print_info("  3. If prompted, complete MFA")
     print_info("  4. After logging in, you should see the myUNSW Student Portal")
     print_info("")
+    print_info("  Waiting for myUNSW session cookie to appear...")
+    print_info("  (The browser is yours to interact with — we just watch.)\n")
 
     start_time = time.time()
-    captured = None
     poll_count = 0
+    showed_message = False
 
     while time.time() - start_time < TIMEOUT:
         poll_count += 1
         try:
-            # Navigate the browser to /portal/ — this carries all the
-            # SSO cookies across domains automatically. If the user is
-            # logged in, we'll land on the dashboard (200).
-            await page.goto(
-                f"{MYUNSW_URL}/portal/",
-                wait_until="domcontentloaded",
-                timeout=10000,
-            )
-            current_url = page.url.lower()
-            page_title = (await page.title()).lower()
+            all_cookies = await context.cookies()
 
-            # If we're on the dashboard, we have a session
-            is_dashboard = (
-                "login" not in current_url
-                and "sso.unsw.edu.au" not in current_url
-                and "microsoftonline" not in current_url
-                and "sign in" not in page_title
-                and "log in" not in page_title
-            )
+            # Collect relevant cookies
+            cookies = {}
+            has_myunsw_session = False
+            for c in all_cookies:
+                domain = c.get("domain", "")
+                name = c["name"]
+                value = c.get("value", "")
+                if not value:
+                    continue
+                # Look for actual myUNSW session indicators
+                if name in MYUNSW_COOKIE_NAMES and "my.unsw.edu.au" in domain:
+                    cookies[name] = value
+                    has_myunsw_session = True
+                # Also keep SSO cookies so we can replay later if needed
+                elif (
+                    "my.unsw.edu.au" in domain
+                    or "unsw.edu.au" in domain
+                    or "microsoftonline" in domain
+                    or name in SSO_COOKIE_NAMES
+                ):
+                    cookies[name] = value
 
-            if is_dashboard:
-                # Capture all cookies now that we know the session is valid
-                all_cookies = await context.cookies()
-                cookies = {}
-                for c in all_cookies:
-                    domain = c.get("domain", "")
-                    name = c["name"]
-                    value = c.get("value", "")
-                    if not value:
-                        continue
-                    # Include myUNSW and SSO cookies
-                    if (
-                        "my.unsw.edu.au" in domain
-                        or "unsw.edu.au" in domain
-                        or "microsoftonline" in domain
-                        or name in MYUNSW_COOKIE_NAMES
-                        or name in SSO_COOKIE_NAMES
-                    ):
-                        cookies[name] = value
+            if has_myunsw_session:
+                print_info("  ✅ myUNSW session cookie detected!")
+                return cookies
 
-                captured = cookies
-                print_info("  ✅ myUNSW session verified!")
-                return captured
-
-            # Show waiting message once
-            if captured is None:
-                captured = {}  # Mark message shown
-                print_info("  ⏳ Waiting for myUNSW login to complete...")
+            if not showed_message:
+                showed_message = True
+                print_info("  ⏳ Waiting for you to complete the login...")
 
             # Heartbeat every 30s
             if poll_count % 30 == 0:
                 elapsed = int(time.time() - start_time)
                 print_info(f"  Still waiting... ({elapsed}s elapsed)")
 
-        except Exception as e:
-            # Navigation can fail while SSO is redirecting — that's OK
-            # print_info(f"  (Navigation: {e})")
+        except Exception:
             pass
 
         await asyncio.sleep(POLL_INTERVAL)
@@ -268,12 +251,18 @@ async def _sso_login_flow(config: Config, platforms: list[str]) -> dict[str, boo
                 else:
                     print_warning("✗ Moodle login did not complete.")
 
-            # ── myUNSW ─────────────────────────────────────────
+            # ── myUNSW ─────────────────────────────────
             if "myunsw" in platforms:
                 print_info("\n🎓 myUNSW login")
-                print_info(f"  Navigating to {MYUNSW_URL}...")
+                # Navigate to /portal/ which triggers the SSO redirect chain
+                # and shows the user the Microsoft login page.
+                print_info(f"  Navigating to {MYUNSW_URL}/portal/ ...")
                 try:
-                    await page.goto(MYUNSW_URL, wait_until="commit", timeout=30000)
+                    await page.goto(
+                        f"{MYUNSW_URL}/portal/",
+                        wait_until="commit",
+                        timeout=30000,
+                    )
                 except Exception as e:
                     print_info(f"  (Navigation note: {e})")
 
