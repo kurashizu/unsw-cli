@@ -46,6 +46,7 @@ timetable_app = typer.Typer(help="📅 UNSW Timetable - class schedule lookup")
 moodle_app = typer.Typer(help="🎓 Moodle - courses, assignments and grades")
 webcms3_app = typer.Typer(help="💻 WebCMS3 - CSE course content")
 library_app = typer.Typer(help="📚 Library - book search")
+myunsw_app = typer.Typer(help="🎓 myUNSW - course enrolment and student services")
 
 app.add_typer(auth_app, name="auth")
 app.add_typer(handbook_app, name="handbook")
@@ -53,6 +54,7 @@ app.add_typer(timetable_app, name="timetable")
 app.add_typer(moodle_app, name="moodle")
 app.add_typer(webcms3_app, name="webcms3")
 app.add_typer(library_app, name="library")
+app.add_typer(myunsw_app, name="myunsw")
 
 # ──────────────────────────────────────────────
 # Global commands
@@ -209,7 +211,21 @@ def status():
                 ["Moodle (Cookie)", "—", "⚪ Not configured", "unsw login --browser"]
             )
 
-        # ── 3. Handbook / Timetable / Library ──
+        # ── 3. myUNSW ──
+        saved = config.load_cookies()
+        myunsw_cookies = {k: v for k, v in saved.items() if k.startswith("myunsw_")}
+        if myunsw_cookies:
+            from unsw.auth.myunsw import verify_session
+
+            ok = verify_session(config)
+            if ok:
+                rows.append(["myUNSW", "Session", "✅ Valid", ""])
+            else:
+                rows.append(["myUNSW", "Session", "❌ Expired", "unsw myunsw login"])
+        else:
+            rows.append(["myUNSW", "—", "⚪ Not configured", "unsw myunsw login"])
+
+        # ── 4. Handbook / Timetable / Library ──
         rows.append(["Handbook", "—", "✅ Public", "No auth needed"])
         rows.append(["Timetable", "—", "✅ Public", "No auth needed"])
         rows.append(["Library", "—", "✅ Public", "No auth needed"])
@@ -326,6 +342,17 @@ def guide():
         "> 💡 Export the cookie right after logging in — do NOT click Log out",
         "",
         "Verify: ```unsw auth status``` — check Moodle (Cookie) shows ✅ Valid",
+        "",
+        "---",
+        "### myUNSW (my.unsw.edu.au)",
+        "",
+        "myUNSW uses the same Azure AD SSO as Moodle. Browser login required.",
+        "",
+        "  ```",
+        "  unsw myunsw login",
+        "  ```",
+        "",
+        "Browser opens → log in via Azure AD → session captured automatically.",
         "",
         "---",
         "### Public Platforms (No Auth Needed)",
@@ -674,6 +701,138 @@ def links():
 
 
 # ──────────────────────────────────────────────
+# myUNSW commands
+# ──────────────────────────────────────────────
+
+
+@myunsw_app.command()
+def login():
+    """🎓 Log into myUNSW via browser (auto-capture session).
+
+    Opens a browser for Azure AD SSO login and automatically
+    captures the myUNSW session cookies.
+    """
+    from unsw.auth.myunsw import login_via_browser
+
+    config = Config()
+    success = login_via_browser(config)
+    if success:
+        print_success("myUNSW login configured!")
+
+
+@myunsw_app.command()
+def courses(json_output: bool = typer.Option(False, "--json", help="Output as JSON")):
+    """🎓 List your currently enrolled courses."""
+    from unsw.modules.myunsw import MyUNSWModule
+
+    config = Config()
+    module = MyUNSWModule(config)
+    if not module.client:
+        return
+
+    with console.status("Fetching enrolled courses..."):
+        result = module.get_enrolled_courses()
+
+    if not result:
+        print_info(
+            "No enrolled courses found or myUNSW not configured.\n"
+            "Run: unsw myunsw login"
+        )
+        return
+
+    fmt = "json" if json_output else "table"
+    format_output(
+        result,
+        columns=["code", "name", "term", "status"],
+        title="Enrolled Courses",
+        output_format=fmt,
+    )
+
+
+@myunsw_app.command()
+def search(code: str):
+    """🔍 Search for available classes by course code.
+
+    Tries to scrape class data from myUNSW. If this doesn't work
+    (myUNSW uses complex JavaScript), use --open to open the
+    enrolment page in your browser.
+    """
+    from unsw.modules.myunsw import MyUNSWModule
+
+    config = Config()
+    module = MyUNSWModule(config)
+    if not module.client:
+        return
+
+    with console.status(f"Searching classes for {code.upper()}..."):
+        result = module.search_classes(code)
+
+    if not result:
+        print_info(
+            f"Could not find class data for {code.upper()}.\n"
+            "Opening myUNSW in your browser for manual search..."
+        )
+        module.open_class_search(code)
+        return
+
+    format_output(
+        result,
+        columns=["class_nbr", "section", "activity", "time", "day", "status", "enrols"],
+        title=f"Available Classes: {code.upper()}",
+    )
+
+
+@myunsw_app.command()
+def enrol(code: str, class_nbr: str):
+    """📝 Enrol in a class.
+
+    Opens myUNSW in your browser and provides instructions
+    for enrolling in the specified class.
+    """
+    from unsw.modules.myunsw import MyUNSWModule
+
+    module = MyUNSWModule(Config())
+    print_info(f"Opening myUNSW to enrol in {code.upper()} (Class #{class_nbr})...")
+    print_info("")
+    print_info("  Steps to complete enrolment:")
+    print_info("  1. Log into myUNSW if prompted")
+    print_info(f"  2. Navigate to: Enrolment → Enrol in Classes")
+    print_info(f"  3. Enter course code: {code.upper()}")
+    print_info(f"  4. Enter Class Nbr: {class_nbr}")
+    print_info(f"  5. Follow the prompts to complete enrolment")
+    module.open_enrolment_page()
+
+
+@myunsw_app.command()
+def drop(code: str):
+    """🗑️ Drop a course.
+
+    Opens myUNSW in your browser and provides instructions
+    for dropping the specified course.
+    """
+    from unsw.modules.myunsw import MyUNSWModule
+
+    module = MyUNSWModule(Config())
+    print_info(f"Opening myUNSW to drop {code.upper()}...")
+    print_info("")
+    print_info("  Steps to drop a course:")
+    print_info("  1. Log into myUNSW if prompted")
+    print_info("  2. Navigate to: Enrolment → Drop Classes")
+    print_info(f"  3. Select {code.upper()} to drop")
+    print_info(f"  4. Confirm the drop request")
+    module.open_enrolment_page()
+
+
+@myunsw_app.command()
+def open():
+    """🌐 Open myUNSW in your browser."""
+    from unsw.modules.myunsw import MyUNSWModule
+
+    module = MyUNSWModule(Config())
+    module.open_enrolment_page()
+
+
+# ──────────────────────────────────────────────
 # Utility functions
 # ──────────────────────────────────────────────
 
@@ -733,95 +892,130 @@ def _do_login(
         else:
             print_error("Invalid cookie format. Use: Name=Value")
 
-    # ── Interactive mode: log into all platforms ──
+    # ── Interactive mode: check status first, then prompt for each platform ──
     if not any([zid, zpass, set_cookie, show]):
         print_panel(
             "🔐 UNSW Login",
-            "This wizard will help you log into all UNSW platforms.\n"
-            "Press Ctrl+C to skip any step.\n",
+            "Checking current login status for all platforms...\n"
+            "Already authenticated platforms can be skipped.\n",
         )
 
-        # ── Step 1: WebCMS3 (zID + zPass) ──
-        print_info("Step 1/2: WebCMS3 (CSE course website)")
-        print_info("Enter your zID and zPass to log into WebCMS3.\n")
-
-        current_zid = config.auth.zid or ""
-        new_zid = typer.prompt("zID", default=current_zid, show_default=True)
-        if new_zid:
-            config.auth.zid = new_zid
-            changed_any = True
-
-        current_zpass = config.auth.zpass or ""
-        new_zpass = typer.prompt(
-            "zPass",
-            default="*****" if current_zpass else "",
-            show_default=False,
-            hide_input=True,
-        )
-        if new_zpass and new_zpass != "*****":
-            config.auth.zpass = new_zpass
-            changed_any = True
-
-        # Save WebCMS3 credentials
-        if changed_any:
-            config.save()
-            print_success("WebCMS3 credentials saved.\n")
-            # Verify config was actually written
-            verify_config = Config()
-            if not verify_config.auth.zid:
-                print_warning(
-                    "Config may not have saved correctly. "
-                    "Check ~/.config/unsw-cli/config.yaml"
-                )
-            else:
-                print_info(f"Config verified: zID={verify_config.auth.zid}")
-
-        # Verify WebCMS3 immediately
-        if config.auth.zid and config.auth.zpass:
-            print_info("Verifying WebCMS3...")
-            from unsw.auth.webcms3 import verify_credentials
-
-            ok = verify_credentials(config.auth.zid, config.auth.zpass)
-            if ok:
-                print_success("WebCMS3 login verified!")
-            else:
-                print_warning("WebCMS3 login failed. Check your zID and zPass.")
-            print()
-
-        # ── Step 2: Moodle (cookie) ──
-        print_info("Step 2/2: Moodle (eLearning)")
-        print_info(
-            "Moodle uses Microsoft SSO (Azure AD). "
-            "A browser will open for you to log in.\n"
-        )
+        # ── Pre-check all platforms ──
+        from unsw.auth.moodle import verify_cookie
+        from unsw.auth.myunsw import verify_session
+        from unsw.auth.webcms3 import verify_credentials
 
         saved_cookies = config.load_cookies()
-        has_moodle = bool(
+        moodle_cookie_val = (
             saved_cookies.get("MoodleSession") or config.auth.moodle_session_cookie
         )
+        myunsw_has_cookies = any(k.startswith("myunsw_") for k in saved_cookies)
 
-        if has_moodle:
-            print_info("MoodleSession cookie is already configured.\n")
-            from unsw.auth.moodle import verify_cookie
+        webcms3_already_ok = bool(
+            config.auth.zid and config.auth.zpass
+        ) and verify_credentials(config.auth.zid, config.auth.zpass)
+        moodle_already_ok = bool(moodle_cookie_val) and verify_cookie(moodle_cookie_val)
+        myunsw_already_ok = myunsw_has_cookies and verify_session(config)
 
-            ok = verify_cookie(
-                saved_cookies.get("MoodleSession") or config.auth.moodle_session_cookie
-            )
-            if ok:
-                print_success("Moodle session is valid!")
+        print()
+
+        # ── Step 1: WebCMS3 (zID + zPass) ──
+        print_info("Step 1/3: WebCMS3 (CSE course website)")
+        if webcms3_already_ok:
+            print_success(f"WebCMS3 already logged in as {config.auth.zid}")
+            redo = typer.confirm("Re-login to WebCMS3?", default=False)
+            if not redo:
+                print_info("  Skipping WebCMS3.\n")
             else:
-                print_warning("MoodleSession cookie has expired.")
-                moodle_choice = typer.confirm(
-                    "Open browser to log into Moodle?", default=True
-                )
-                if moodle_choice:
-                    _do_moodle_browser_login()
-        else:
+                webcms3_already_ok = False  # Force re-login
+
+        if not webcms3_already_ok:
+            print_info("Enter your zID and zPass to log into WebCMS3.\n")
+
+            current_zid = config.auth.zid or ""
+            new_zid = typer.prompt("zID", default=current_zid, show_default=True)
+            if new_zid:
+                config.auth.zid = new_zid
+                changed_any = True
+
+            current_zpass = config.auth.zpass or ""
+            new_zpass = typer.prompt(
+                "zPass",
+                default="*****" if current_zpass else "",
+                show_default=False,
+                hide_input=True,
+            )
+            if new_zpass and new_zpass != "*****":
+                config.auth.zpass = new_zpass
+                changed_any = True
+
+            # Save WebCMS3 credentials
+            if changed_any:
+                config.save()
+                print_success("WebCMS3 credentials saved.\n")
+                verify_config = Config()
+                if not verify_config.auth.zid:
+                    print_warning(
+                        "Config may not have saved correctly. "
+                        "Check ~/.config/unsw-cli/config.yaml"
+                    )
+                else:
+                    print_info(f"Config verified: zID={verify_config.auth.zid}")
+
+            # Verify WebCMS3 immediately
+            if config.auth.zid and config.auth.zpass:
+                print_info("Verifying WebCMS3...")
+                ok = verify_credentials(config.auth.zid, config.auth.zpass)
+                if ok:
+                    print_success("WebCMS3 login verified!")
+                else:
+                    print_warning("WebCMS3 login failed. Check your zID and zPass.")
+
+        print()
+
+        # ── Step 2: Moodle (cookie / browser) ──
+        print_info("Step 2/3: Moodle (eLearning)")
+        print_info("Moodle uses Microsoft SSO (Azure AD) — browser login.\n")
+
+        if moodle_already_ok:
+            print_success("Moodle session is already valid.")
+            redo = typer.confirm("Re-login to Moodle?", default=False)
+            if not redo:
+                print_info("  Skipping Moodle.\n")
+            else:
+                moodle_already_ok = False
+
+        if not moodle_already_ok:
             moodle_choice = typer.confirm(
-                "Open browser to log into Moodle now?", default=True
+                "Open browser to log into Moodle?", default=True
             )
             if moodle_choice:
                 _do_moodle_browser_login()
+
+        print()
+
+        # ── Step 3: myUNSW (browser) ──
+        print_info("Step 3/3: myUNSW (course enrolment)")
+        print_info("myUNSW uses Microsoft SSO (Azure AD) — browser login.\n")
+
+        if myunsw_already_ok:
+            print_success("myUNSW session is already valid.")
+            redo = typer.confirm("Re-login to myUNSW?", default=False)
+            if not redo:
+                print_info("  Skipping myUNSW.\n")
+            else:
+                myunsw_already_ok = False
+
+        if not myunsw_already_ok:
+            myunsw_choice = typer.confirm(
+                "Open browser to log into myUNSW?", default=True
+            )
+            if myunsw_choice:
+                from unsw.auth.myunsw import login_via_browser
+
+                success = login_via_browser(config)
+                if success:
+                    print_success("myUNSW login configured!")
 
         print()
         print_success("Login setup complete!")
