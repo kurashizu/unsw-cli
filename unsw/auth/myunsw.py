@@ -358,6 +358,29 @@ async def _browser_login_flow() -> Optional[dict[str, str]]:
                 if myunsw_cookies:
                     # Try to verify by accessing student home
                     if await _verify_session_async(myunsw_cookies):
+                        # Prime the /active/ session so the BSDS endpoints
+                        # get a JSESSIONID cookie scoped to path=/active.
+                        try:
+                            print_info(
+                                "  Establishing /active session for BSDS endpoints..."
+                            )
+                            await page.goto(
+                                f"{MYUNSW_BASE}/active/studentClassEnrol/years.xml",
+                                wait_until="domcontentloaded",
+                                timeout=15000,
+                            )
+                            await asyncio.sleep(1.5)
+                            all_cookies = await context.cookies()
+                            for c in all_cookies:
+                                if c.get("value") and (
+                                    MYUNSW_BASE in c.get("domain", "")
+                                    or c["name"]
+                                    in ("PS_TOKEN", "PS_TOKENEXPIRE", "myunsw_session")
+                                ):
+                                    myunsw_cookies[c["name"]] = c["value"]
+                        except Exception as e:
+                            print_info(f"  (Could not prime /active session: {e})")
+
                         captured_cookies = myunsw_cookies
                         print_info("\n  ✅ myUNSW session verified! Login successful!")
                         break
@@ -464,6 +487,31 @@ def _check_session_cookies(cookies: dict[str, str]) -> bool:
                 ),
             }
         )
+        # Try the /active/ BSDS endpoint first — this is the most reliable
+        # indicator that the session has a /active-scoped JSESSIONID and the
+        # TGC SSO cookie are both alive.
+        try:
+            resp = client.get(f"{MYUNSW_BASE}/active/studentClassEnrol/years.xml")
+            if resp.status_code == 200:
+                # A real BSDS page will contain a bsdsSequence hidden field
+                if 'bsdsSequence" value="' in resp.text:
+                    return True
+                # Otherwise it's the CAS login page
+                return False
+            # If we get a redirect, see where it goes
+            location = resp.headers.get("location", "")
+            if resp.status_code in (302, 303, 307, 308):
+                if (
+                    "login" not in location.lower()
+                    and "sso.unsw.edu.au" not in location
+                    and "login.microsoftonline" not in location
+                ):
+                    return True
+                return False
+        except Exception:
+            pass
+
+        # Fallback: try the /portal/ page
         try:
             resp = client.get(f"{MYUNSW_BASE}/portal/")
             if resp.status_code == 200:

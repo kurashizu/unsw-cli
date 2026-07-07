@@ -208,6 +208,29 @@ async def _wait_for_myunsw_login(context, page) -> Optional[dict[str, str]]:
 
             # All checks pass — user is logged in
             print_info("  ✅ myUNSW session detected!")
+
+            # IMPORTANT: navigate to an /active/ URL so the server sets a
+            # JSESSIONID cookie scoped to path=/active (not just /portal).
+            # Without this, plain httpx requests to /active/... endpoints
+            # fail because the wrong-scoped JSESSIONID is sent.
+            print_info("  Establishing /active session (BSDS endpoints)...")
+            try:
+                await page.goto(
+                    f"{MYUNSW_URL}/active/studentClassEnrol/years.xml",
+                    wait_until="domcontentloaded",
+                    timeout=15000,
+                )
+                # Give the server a moment to issue the cookie
+                await asyncio.sleep(1.5)
+                # Re-collect cookies — should now include JSESSIONID path=/active
+                all_cookies = await context.cookies()
+                for c in all_cookies:
+                    if c.get("value"):
+                        cookies[c["name"]] = c["value"]
+                print_info("  ✅ BSDS session cookie acquired")
+            except Exception as e:
+                print_info(f"  (Could not prime /active session: {e})")
+
             return cookies
 
         except Exception:

@@ -41,31 +41,42 @@ class TestSSOVerifyHelpers:
     @pytest.mark.asyncio
     @respx.mock
     async def test_verify_myunsw_session_direct_200(self):
-        """Direct 200 to /portal/ → valid."""
-        respx.get(MYUNSW_URL + "/portal/").mock(
-            return_value=httpx.Response(200, text="<html>Student Portal</html>")
+        """Direct 200 to /active/ BSDS page → valid (has bsdsSequence)."""
+        bsds_html = '<html><input type="hidden" name="bsdsSequence" value="123"/></html>'
+        respx.get(MYUNSW_URL + "/active/studentClassEnrol/years.xml").mock(
+            return_value=httpx.Response(200, text=bsds_html)
         )
-        assert await _verify_myunsw_session({"PS_TOKEN": "abc"}) is True
+        assert await _verify_myunsw_session({"JSESSIONID": "abc"}) is True
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_verify_myunsw_session_redirect_to_login(self):
-        """Redirect to CAS login → invalid."""
-        respx.get(MYUNSW_URL + "/portal/").mock(
+        """No JSESSIONID → invalid (returns False without making any request)."""
+        # With no JSESSIONID, the check returns False immediately.
+        # If JSESSIONID were present, the /active/ URL would be hit.
+        respx.get(MYUNSW_URL + "/active/studentClassEnrol/years.xml").mock(
             return_value=httpx.Response(
                 302,
                 text="",
                 headers={"location": "https://sso.unsw.edu.au/cas/login?service=..."},
             )
         )
+        # No JSESSIONID → returns False without making any HTTP request
         assert await _verify_myunsw_session({}) is False
+        # With JSESSIONID but redirect to login → False
+        assert await _verify_myunsw_session({"JSESSIONID": "expired"}) is False
 
     @pytest.mark.asyncio
     @respx.mock
     async def test_verify_myunsw_network_error(self):
         """Network errors → False (gracefully)."""
-        respx.get(MYUNSW_URL + "/portal/").mock(side_effect=httpx.ConnectError("fail"))
+        respx.get(MYUNSW_URL + "/active/studentClassEnrol/years.xml").mock(
+            side_effect=httpx.ConnectError("fail")
+        )
+        # No JSESSIONID → returns False without making any HTTP request
         assert await _verify_myunsw_session({}) is False
+        # With JSESSIONID and a network error → False (gracefully)
+        assert await _verify_myunsw_session({"JSESSIONID": "abc"}) is False
 
 
 class TestSSOLoginAll:

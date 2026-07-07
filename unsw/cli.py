@@ -139,28 +139,28 @@ def login(
     # ── Single-platform flows (non-interactive) ──────────────
 
     if platform == "moodle":
-            if browser:
-                from unsw.auth.sso import sso_login_all
+        if browser:
+            from unsw.auth.sso import sso_login_all
 
-                results = sso_login_all(config, platforms=["moodle"])
-                if results.get("moodle"):
-                    print_success("Moodle login configured!")
-                return
-            if set_cookie:
-                if "=" in set_cookie:
-                    key, value = set_cookie.split("=", 1)
-                    cookies = config.load_cookies()
-                    cookies[key] = value
-                    config.save_cookies(cookies)
-                    print_success(f"Cookie '{key}' saved")
-                    return
-                print_error("Invalid cookie format. Use: Name=Value")
-                raise typer.Exit(code=1)
-            # No browser and no cookie flag → fall through to interactive wizard
-            # for Moodle only
-            print_info("Use --browser to open the Moodle SSO login, or")
-            print_info("use --set-cookie MoodleSession=<value> to set manually.")
+            results = sso_login_all(config, platforms=["moodle"])
+            if results.get("moodle"):
+                print_success("Moodle login configured!")
             return
+        if set_cookie:
+            if "=" in set_cookie:
+                key, value = set_cookie.split("=", 1)
+                cookies = config.load_cookies()
+                cookies[key] = value
+                config.save_cookies(cookies)
+                print_success(f"Cookie '{key}' saved")
+                return
+            print_error("Invalid cookie format. Use: Name=Value")
+            raise typer.Exit(code=1)
+        # No browser and no cookie flag → fall through to interactive wizard
+        # for Moodle only
+        print_info("Use --browser to open the Moodle SSO login, or")
+        print_info("use --set-cookie MoodleSession=<value> to set manually.")
+        return
 
     if platform == "myunsw":
         if browser:
@@ -836,7 +836,7 @@ def courses(json_output: bool = typer.Option(False, "--json", help="Output as JS
     if not result:
         print_info(
             "No enrolled courses found or myUNSW not configured.\n"
-            "Run: unsw myunsw login"
+            "Run: unsw login --platform myunsw --browser"
         )
         return
 
@@ -951,8 +951,45 @@ def timetable(json_output: bool = typer.Option(False, "--json", help="Output as 
     fmt = "json" if json_output else "table"
     format_output(
         result,
-        columns=["code", "activity", "section", "day", "time", "location", "weeks"],
+        columns=["course", "activity", "section", "day", "time", "location", "weeks"],
         title="My Class Timetable",
+        output_format=fmt,
+    )
+
+
+@myunsw_app.command()
+def grades(
+    term: Optional[str] = typer.Option(
+        None,
+        "--term",
+        "-t",
+        help="Term code (e.g. 5266 for T2 2026). Omit to fetch all known terms.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+):
+    """🎓 View your academic results from myUNSW.
+
+    Without --term, fetches grades for all known recent terms.
+    """
+    from unsw.modules.myunsw import MyUNSWModule
+
+    config = Config()
+    module = MyUNSWModule(config)
+    if not module.client:
+        return
+
+    with console.status("Fetching grades..."):
+        result = module.get_grades(term=term)
+
+    if not result:
+        print_info("No grades found or myUNSW not configured.")
+        return
+
+    fmt = "json" if json_output else "table"
+    format_output(
+        result,
+        columns=["term", "code", "name", "mark", "grade"],
+        title="Academic Results",
         output_format=fmt,
     )
 
@@ -1134,17 +1171,13 @@ def _do_login(
 
         if sso_platforms_needed:
             names = "/".join(p.title() for p in sso_platforms_needed)
-            print_info(
-                f"Step 2/3 + 3/3: Unified SSO login for {names}"
-            )
+            print_info(f"Step 2/3 + 3/3: Unified SSO login for {names}")
             print_info(
                 "Both Moodle and myUNSW use Microsoft Azure AD SSO.\n"
                 "We'll open the browser ONCE — log into each in turn.\n"
             )
 
-            redo_choice = typer.confirm(
-                "Open browser for SSO login?", default=True
-            )
+            redo_choice = typer.confirm("Open browser for SSO login?", default=True)
             if redo_choice:
                 from unsw.auth.sso import sso_login_all
 
@@ -1163,8 +1196,7 @@ def _do_login(
                         f"Login did not complete for: {', '.join(failed)}.\n"
                         "  You can retry later with:\n"
                         + "\n".join(
-                            f"    unsw login --platform {p} --browser"
-                            for p in failed
+                            f"    unsw login --platform {p} --browser" for p in failed
                         )
                     )
 
