@@ -8,6 +8,7 @@ PeopleSoft cookies on the my.unsw.edu.au domain.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Optional
 
