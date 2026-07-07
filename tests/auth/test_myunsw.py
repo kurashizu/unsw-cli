@@ -32,8 +32,7 @@ class TestVerifySession:
     @respx.mock
     def test_expired_session(self, config_with_moodle_cookie):
         """Session that redirects to login → returns False."""
-        config_with_moodle_cookie.save_cookies({"myunsw_PS_TOKEN": "expired_token"})
-        # /portal/ redirects to CAS login when not authed
+        # No SSO cookies, no PS_TOKEN, /portal/ redirects to CAS login
         respx.get(MYUNSW_BASE + "/portal/").mock(
             return_value=httpx.Response(
                 302,
@@ -44,9 +43,16 @@ class TestVerifySession:
         assert verify_session(config_with_moodle_cookie) is False
 
     @respx.mock
+    def test_sso_cookie_proves_auth(self, config_with_moodle_cookie):
+        """Azure AD SSO cookies alone are proof of authentication."""
+        config_with_moodle_cookie.save_cookies(
+            {"myunsw_ESTSAUTHPERSISTENT": "fake_sso_token"}
+        )
+        assert verify_session(config_with_moodle_cookie) is True
+
+    @respx.mock
     def test_network_error(self, config_with_moodle_cookie):
         """Network errors → returns False gracefully."""
-        config_with_moodle_cookie.save_cookies({"myunsw_PS_TOKEN": "any_token"})
         respx.get(MYUNSW_BASE + "/portal/").mock(side_effect=httpx.ConnectError("fail"))
         assert verify_session(config_with_moodle_cookie) is False
 
@@ -76,10 +82,16 @@ class TestLoginWithCookie:
         assert client.cookies.get("PS_TOKEN") == "session_abc"
 
     @respx.mock
+    def test_sso_cookie_authenticates(self, isolated_config):
+        """Azure AD SSO cookie is enough to authenticate."""
+        isolated_config.save_cookies({"myunsw_ESTSAUTHPERSISTENT": "abc123"})
+
+        client = login_with_cookie(isolated_config)
+        assert client is not None
+
+    @respx.mock
     def test_expired_session_returns_none(self, isolated_config):
         """Expired session → returns None."""
-        isolated_config.save_cookies({"myunsw_PS_TOKEN": "expired"})
-
         # /portal/ redirects to CAS login when not authed
         respx.get(MYUNSW_BASE + "/portal/").mock(
             return_value=httpx.Response(

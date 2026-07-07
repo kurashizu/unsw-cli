@@ -119,16 +119,18 @@ async def _wait_for_myunsw_login(context, page) -> Optional[dict[str, str]]:
     """Wait for user to complete myUNSW SSO, return the verified session cookies.
 
     Strategy: poll the browser's cookies without navigating the page.
-    After Azure AD login, myUNSW (PeopleSoft) sets a PS_TOKEN cookie on
-    my.unsw.edu.au. We watch for that cookie and treat its presence as
-    proof of a successful login.
+    We accept any of these as proof of a successful login:
+    - PS_TOKEN on my.unsw.edu.au (legacy PeopleSoft session)
+    - ESTSAUTHPERSISTENT on login.microsoftonline.com (Azure AD persistent SSO)
+    - SignInStateCookie on login.microsoftonline.com (Azure AD sign-in state)
+    - _iam_id or other iam.unsw.edu.au session cookies
     """
     print_info("  1. Wait for the myUNSW page to load")
     print_info("  2. Log in with your UNSW zID and password (Azure AD SSO)")
     print_info("  3. If prompted, complete MFA")
-    print_info("  4. After logging in, you should see the myUNSW Student Portal")
+    print_info("  4. After logging in, you should see the Student Hub dashboard")
     print_info("")
-    print_info("  Waiting for myUNSW session cookie to appear...")
+    print_info("  Watching for session cookies (Azure AD / myUNSW)...")
     print_info("  (The browser is yours to interact with — we just watch.)\n")
 
     start_time = time.time()
@@ -140,30 +142,39 @@ async def _wait_for_myunsw_login(context, page) -> Optional[dict[str, str]]:
         try:
             all_cookies = await context.cookies()
 
-            # Collect relevant cookies
             cookies = {}
-            has_myunsw_session = False
+            has_session = False
             for c in all_cookies:
                 domain = c.get("domain", "")
                 name = c["name"]
                 value = c.get("value", "")
                 if not value:
                     continue
-                # Look for actual myUNSW session indicators
+
+                # Legacy PeopleSoft indicator
                 if name in MYUNSW_COOKIE_NAMES and "my.unsw.edu.au" in domain:
                     cookies[name] = value
-                    has_myunsw_session = True
-                # Also keep SSO cookies so we can replay later if needed
+                    has_session = True
+
+                # Azure AD SSO cookies — strongest indicator of successful login
                 elif (
-                    "my.unsw.edu.au" in domain
-                    or "unsw.edu.au" in domain
-                    or "microsoftonline" in domain
-                    or name in SSO_COOKIE_NAMES
-                ):
+                    "login.microsoftonline.com" in domain or "login.live.com" in domain
+                ) and name in SSO_COOKIE_NAMES:
+                    cookies[name] = value
+                    has_session = True
+
+                # UNSW IAM identity manager cookies
+                elif "iam.unsw.edu.au" in domain:
+                    cookies[name] = value
+                    if name.startswith("_iam_") or "session" in name.lower():
+                        has_session = True
+
+                # Keep myUNSW/UNSW cookies for later use
+                elif "my.unsw.edu.au" in domain or "unsw.edu.au" in domain:
                     cookies[name] = value
 
-            if has_myunsw_session:
-                print_info("  ✅ myUNSW session cookie detected!")
+            if has_session:
+                print_info("  ✅ myUNSW session detected!")
                 return cookies
 
             if not showed_message:

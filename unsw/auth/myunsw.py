@@ -216,6 +216,20 @@ def _check_session_cookies(cookies: dict[str, str]) -> bool:
 
     Returns True if the user has a valid myUNSW session, False otherwise.
     """
+    # Quick check: any Azure AD SSO cookie indicates authentication.
+    # Azure AD SSO cookies are scoped to login.microsoftonline.com which
+    # means httpx won't send them to my.unsw.edu.au — so we can't use a
+    # direct httpx call to verify them. Instead, presence alone is enough
+    # proof that the user completed Azure AD login.
+    sso_indicators = {"ESTSAUTHPERSISTENT", "SignInStateCookie", "buid"}
+    if any(name in sso_indicators for name in cookies):
+        return True
+
+    # If we have a PS_TOKEN cookie on my.unsw.edu.au, that's also proof
+    # (legacy PeopleSoft session)
+    if "PS_TOKEN" in cookies:
+        return True
+
     client = httpx.Client(
         follow_redirects=False,
         timeout=15.0,
@@ -236,7 +250,11 @@ def _check_session_cookies(cookies: dict[str, str]) -> bool:
         # If we get a 200, the user is signed in.
         resp = client.get(f"{MYUNSW_BASE}/portal/")
         if resp.status_code == 200:
-            return True
+            # 200 on /portal/ is the public search page, not authed dashboard
+            # Check if the response is the search page (large body) vs authed
+            if "Sign On" not in resp.text and "Apply Online" not in resp.text:
+                return True
+            return False
         # Check if redirect goes to a login page
         location = resp.headers.get("location", "")
         if "login" in location.lower() or "sso.unsw.edu.au" in location:
@@ -296,19 +314,24 @@ def login_with_cookie(config: Config) -> httpx.Client | None:
 
     # Verify
     try:
-            # /portal/ redirects to sso.unsw.edu.au/cas/login when not authed
-            resp = client.get(f"{MYUNSW_BASE}/portal/", follow_redirects=False)
-            location = resp.headers.get("location", "")
-            if (
-                resp.status_code in (302, 303, 307, 308)
-                or "login" in location.lower()
-                or "sso.unsw.edu.au" in location
-            ):
-                print_warning("myUNSW session appears to be expired.")
-                print_warning("Please log in again: unsw myunsw login")
-                return None
+        # Quick check: SSO cookies alone are proof of authentication
+        if _check_session_cookies(myunsw_cookies):
             print_success("myUNSW session authenticated!")
             return client
+
+        # Otherwise do an HTTP check
+        resp = client.get(f"{MYUNSW_BASE}/portal/", follow_redirects=False)
+        location = resp.headers.get("location", "")
+        if (
+            resp.status_code in (302, 303, 307, 308)
+            or "login" in location.lower()
+            or "sso.unsw.edu.au" in location
+        ):
+            print_warning("myUNSW session appears to be expired.")
+            print_warning("Please log in again: unsw myunsw login")
+            return None
+        print_success("myUNSW session authenticated!")
+        return client
     except Exception as e:
         print_error(f"myUNSW connection error: {e}")
         return None
