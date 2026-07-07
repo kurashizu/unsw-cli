@@ -260,7 +260,17 @@ class MyUNSWModule(BaseModule):
         scrapes the DOM for course codes.
         """
         if not self.client:
+            print_info(
+                "myUNSW not logged in. Run: unsw login --platform myunsw --browser"
+            )
             return []
+
+        state_path = CONFIG_DIR / "myunsw_storage.json"
+        if not state_path.exists():
+            print_info(
+                "myUNSW session needs to be captured. "
+                "Run: unsw login --platform myunsw --browser"
+            )
 
         return _scrape_courses_sync(self.config)
 
@@ -293,7 +303,17 @@ class MyUNSWModule(BaseModule):
         for each enrolled course.
         """
         if not self.client:
+            print_info(
+                "myUNSW not logged in. Run: unsw login --platform myunsw --browser"
+            )
             return []
+
+        state_path = CONFIG_DIR / "myunsw_storage.json"
+        if not state_path.exists():
+            print_info(
+                "myUNSW session needs to be captured. "
+                "Run: unsw login --platform myunsw --browser"
+            )
 
         return _scrape_timetable_sync(self.config)
 

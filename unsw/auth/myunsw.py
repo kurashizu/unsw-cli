@@ -28,10 +28,11 @@ TIMEOUT = 600  # 10 minutes
 
 
 def login_via_browser(config: Config) -> bool:
-    """Open a browser for myUNSW login, capture cookies automatically.
+    """Open a browser for myUNSW login, capture cookies and storage state.
 
     Returns True if successful, False otherwise.
-    Cookies are saved to the config's cookie store on success.
+    Cookies AND full browser storage_state are saved so the session can
+    be resumed in a future Playwright context.
     """
     try:
         from unsw.auth.browser import _check_playwright, _ensure_chromium_installed
@@ -43,7 +44,7 @@ def login_via_browser(config: Config) -> bool:
         return False
 
     try:
-        cookies = asyncio.run(_browser_login_flow())
+        result = asyncio.run(_browser_login_flow_with_state())
     except KeyboardInterrupt:
         print_info("\nLogin cancelled.")
         return False
@@ -54,16 +55,125 @@ def login_via_browser(config: Config) -> bool:
         print_info(f"  Details: {traceback.format_exc()}")
         return False
 
-    if cookies:
-        # Save with myunsw_ prefix to namespace them
+    if result:
+        cookies, context = result
+        # Save cookies with myunsw_ prefix
         all_cookies = config.load_cookies()
         for key, value in cookies.items():
             all_cookies[f"myunsw_{key}"] = value
         config.save_cookies(all_cookies)
         print_success("myUNSW session cookies captured and saved!")
+
+        # Save browser storage state for future use
+        try:
+            from unsw.config import CONFIG_DIR
+
+            state = asyncio.run(context.storage_state())
+            state_path = CONFIG_DIR / "myunsw_storage.json"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(state_path, "w") as f:
+                json.dump(state, f, indent=2, default=str)
+            print_success("✓ myUNSW browser state saved for future sessions")
+        except Exception as e:
+            print_info(f"  (Could not save storage state: {e})")
+        finally:
+            try:
+                asyncio.run(context.close())
+            except Exception:
+                pass
         return True
 
     return False
+
+
+async def _browser_login_flow_with_state():
+    """Like _browser_login_flow but also returns the context for state-saving."""
+    from playwright.async_api import async_playwright
+
+    print_info("Opening browser for myUNSW login...")
+    print_info("")
+    print_info("  A browser window will open. Follow these steps:")
+    print_info("  1. Wait for the myUNSW page to load")
+    print_info("  2. Log in with your UNSW zID and password (Azure AD SSO)")
+    print_info("  3. If prompted, complete MFA")
+    print_info("  4. After logging in, you should see the myUNSW Student Portal")
+    print_info("")
+
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(
+                headless=False,
+                args=[
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--window-size=1024,768",
+                    "--disable-infobars",
+                ],
+            )
+        except Exception as e:
+            print_error(f"Failed to launch browser: {e}")
+            return None
+
+        try:
+            context = await browser.new_context(
+                viewport={"width": 1024, "height": 768},
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36"
+                ),
+                no_viewport=True,
+            )
+            page = await context.new_page()
+        except Exception as e:
+            print_error(f"Failed to create browser page: {e}")
+            await browser.close()
+            return None
+
+        try:
+            print_info("  Navigating to myUNSW...")
+            try:
+                await page.goto(MYUNSW_BASE, wait_until="commit", timeout=30000)
+            except Exception as e:
+                print_info(f"  (Navigation note: {e})")
+
+            print_info("  Browser is open. Waiting for you to log in...")
+
+            await asyncio.sleep(2)
+
+            start_time = time.time()
+            captured_cookies = None
+
+            while time.time() - start_time < TIMEOUT:
+                try:
+                    cookies = await context.cookies()
+                    cookies_dict = {}
+                    for c in cookies:
+                        if not c.get("value"):
+                            continue
+                        cookies_dict[c["name"]] = c["value"]
+
+                    if await _verify_session_async(cookies_dict):
+                        captured_cookies = cookies_dict
+                        print_info("\n  ✅ myUNSW session verified!")
+                        return captured_cookies, context
+                except Exception:
+                    pass
+
+                await asyncio.sleep(POLL_INTERVAL)
+
+            print_info(f"\n  Timeout ({TIMEOUT // 60} min) reached.")
+            await context.close()
+            await browser.close()
+            return None
+        except Exception as e:
+            print_error(f"Browser login flow failed: {e}")
+            try:
+                await context.close()
+                await browser.close()
+            except Exception:
+                pass
+            return None
 
 
 async def _browser_login_flow() -> Optional[dict[str, str]]:
