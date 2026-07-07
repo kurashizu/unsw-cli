@@ -541,7 +541,15 @@ def _check_session_cookies(cookies: dict[str, str]) -> bool:
 
 
 def verify_session(config: Config) -> bool:
-    """Verify stored myUNSW session cookies are still valid."""
+    """Verify stored myUNSW session cookies are still valid.
+
+    This is a fast check that looks at strong indicators (Azure AD SSO
+    cookies, DISSESSIONAuthnDelegation, PS_TOKEN). It does NOT make an
+    HTTP request. Use this for status display.
+
+    For a strict check that actually hits the BSDS endpoint, use
+    verify_bsds_session().
+    """
     saved = config.load_cookies()
     myunsw_cookies = {
         k.removeprefix("myunsw_"): v
@@ -551,6 +559,50 @@ def verify_session(config: Config) -> bool:
     if not myunsw_cookies:
         return False
     return _check_session_cookies(myunsw_cookies)
+
+
+def verify_bsds_session(config: Config) -> bool:
+    """Strict verification: hits the BSDS /active/ endpoint to confirm
+    the session is alive and the JSESSIONID is properly scoped.
+
+    This is slower (one HTTP request) but more reliable than
+    verify_session(). Use this before actually trying to fetch data.
+    """
+    saved = config.load_cookies()
+    myunsw_cookies = {
+        k.removeprefix("myunsw_"): v
+        for k, v in saved.items()
+        if k.startswith("myunsw_")
+    }
+    if not myunsw_cookies:
+        return False
+    if not _check_session_cookies(myunsw_cookies):
+        return False
+    # Also verify the BSDS endpoint responds with a real BSDS page.
+    client = httpx.Client(
+        follow_redirects=True,
+        timeout=15.0,
+        cookies=myunsw_cookies,
+    )
+    client.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+        }
+    )
+    try:
+        resp = client.get(f"{MYUNSW_BASE}/active/studentClassEnrol/years.xml")
+        if resp.status_code != 200:
+            return False
+        # Real BSDS page contains a bsdsSequence hidden input
+        return 'bsdsSequence" value="' in resp.text
+    except Exception:
+        return False
+    finally:
+        client.close()
 
 
 def login_with_cookie(config: Config) -> httpx.Client | None:
