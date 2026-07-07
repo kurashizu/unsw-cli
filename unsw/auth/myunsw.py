@@ -169,8 +169,44 @@ async def _browser_login_flow_with_state():
         start_time = time.time()
         captured_cookies = None
 
+        # Wait for the user to fully complete login AND land on the
+        # myUNSW dashboard (not just any SSO redirect). We do this by
+        # checking the browser's current URL: once we're past the SSO
+        # login pages and on a real myUNSW page, the user is logged in.
         while time.time() - start_time < TIMEOUT:
             try:
+                current_url = (page.url or "").lower()
+
+                # Skip if we're still on a login page
+                on_login_page = any(
+                    fragment in current_url
+                    for fragment in (
+                        "sso.unsw.edu.au/cas/login",
+                        "login.microsoftonline.com",
+                        "login.live.com",
+                    )
+                )
+                if on_login_page:
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
+                # Skip if we're on the public myUNSW search page
+                try:
+                    html = await page.content()
+                except Exception:
+                    html = ""
+                is_public = (
+                    "Single Sign On" in html
+                    or "Welcome to Single Sign On" in html
+                    or "Apply Online" in html
+                    or "Future Students" in html
+                )
+                if is_public:
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
+                # Now we should be on a logged-in myUNSW page. Capture
+                # the cookies and verify.
                 cookies = await context.cookies()
                 cookies_dict = {}
                 for c in cookies:
@@ -178,6 +214,22 @@ async def _browser_login_flow_with_state():
                         continue
                     cookies_dict[c["name"]] = c["value"]
 
+                # Make sure we have *some* real session cookie, not just
+                # the public page's AWSALB/etc.
+                has_real_session = any(
+                    name in cookies_dict
+                    for name in (
+                        "JSESSIONID",
+                        "PS_TOKEN",
+                        "DISSESSIONAuthnDelegation",
+                        "ESTSAUTHPERSISTENT",
+                    )
+                )
+                if not has_real_session:
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
+                # Final confirmation: the verifier returns True
                 if await _verify_session_async(cookies_dict):
                     captured_cookies = cookies_dict
                     print_info("\n  ✅ myUNSW session verified!")
@@ -185,7 +237,7 @@ async def _browser_login_flow_with_state():
             except Exception:
                 pass
 
-            await asyncio.sleep(POLL_INTERVAL)
+        await asyncio.sleep(POLL_INTERVAL)
 
         if not captured_cookies:
             print_info(f"\n  Timeout ({TIMEOUT // 60} min) reached.")
@@ -358,57 +410,76 @@ def _check_session_cookies(cookies: dict[str, str]) -> bool:
     """Synchronous check: are these cookies enough to access the protected portal?
 
     Returns True if the user has a valid myUNSW session, False otherwise.
+
+    IMPORTANT: We do NOT use 'buid' as a session indicator. That cookie
+    is set by UNSW as a browser-unique ID on first visit, well before the
+    user logs in. Using it causes premature 'verified' detection.
     """
-    # Quick check: any Azure AD SSO cookie indicates authentication.
-    # Azure AD SSO cookies are scoped to login.microsoftonline.com which
-    # means httpx won't send them to my.unsw.edu.au — so we can't use a
-    # direct httpx call to verify them. Instead, presence alone is enough
-    # proof that the user completed Azure AD login.
-    sso_indicators = {"ESTSAUTHPERSISTENT", "SignInStateCookie", "buid"}
-    if any(name in sso_indicators for name in cookies):
+    # Strong indicators that the user is logged in:
+    # - ESTSAUTHPERSISTENT on Azure AD (set AFTER successful login)
+    # - SignInStateCookie on Azure AD (set AFTER successful login)
+    # - DISSESSIONAuthnDelegation on myUNSW (set AFTER successful login)
+    # - JSESSIONID on myUNSW (session id, set after login)
+    # - PS_TOKEN on myUNSW (legacy PeopleSoft session)
+
+    # buid is intentionally excluded — it's set too early to be a
+    # reliable auth indicator.
+
+    # Direct check on the cookies we got (assumes they're already filtered
+    # by domain in the caller)
+    strong_indicators = {
+        "ESTSAUTHPERSISTENT",
+        "SignInStateCookie",
+        "DISSESSIONAuthnDelegation",
+        "PS_TOKEN",
+    }
+    if any(name in strong_indicators for name in cookies):
         return True
 
-    # If we have a PS_TOKEN cookie on my.unsw.edu.au, that's also proof
-    # (legacy PeopleSoft session)
-    if "PS_TOKEN" in cookies:
-        return True
-
-    client = httpx.Client(
-        follow_redirects=False,
-        timeout=15.0,
-        cookies=cookies,
-    )
-    client.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-        }
-    )
-
-    try:
-        # /portal/ redirects to sso.unsw.edu.au/cas/login when not authed.
-        # If we get a 200, the user is signed in.
-        resp = client.get(f"{MYUNSW_BASE}/portal/")
-        if resp.status_code == 200:
-            # 200 on /portal/ is the public search page, not authed dashboard
-            # Check if the response is the search page (large body) vs authed
-            if "Sign On" not in resp.text and "Apply Online" not in resp.text:
-                return True
-            return False
-        # Check if redirect goes to a login page
-        location = resp.headers.get("location", "")
-        if "login" in location.lower() or "sso.unsw.edu.au" in location:
-            return False
-        # Any redirect that doesn't go to login means we're authenticated
-        # but being routed somewhere else (still valid)
-        if resp.status_code in (302, 303, 307, 308):
-            return "login" not in location.lower()
+    # If we have a JSESSIONID, try the actual myUNSW endpoint to see if
+    # it grants us access. JSESSIONID alone is not proof — it can be a
+    # pre-session cookie set before login.
+    if "JSESSIONID" in cookies:
+        client = httpx.Client(
+            follow_redirects=False,
+            timeout=15.0,
+            cookies=cookies,
+        )
+        client.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/125.0.0.0 Safari/537.36"
+                ),
+            }
+        )
+        try:
+            resp = client.get(f"{MYUNSW_BASE}/portal/")
+            if resp.status_code == 200:
+                # 200 on /portal/ is the public search page (not authed)
+                if (
+                    "Sign On" not in resp.text
+                    and "Apply Online" not in resp.text
+                    and "Single Sign On" not in resp.text
+                ):
+                    return True
+                return False
+            # If we get a redirect that's NOT to a login page, we're authed
+            location = resp.headers.get("location", "")
+            if resp.status_code in (302, 303, 307, 308):
+                if (
+                    "login" not in location.lower()
+                    and "sso.unsw.edu.au" not in location
+                    and "login.microsoftonline" not in location
+                ):
+                    return True
+                return False
+        except Exception:
+            pass
         return False
-    except Exception:
-        return False
+
+    return False
 
 
 def verify_session(config: Config) -> bool:
