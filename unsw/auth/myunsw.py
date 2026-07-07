@@ -158,7 +158,12 @@ async def _browser_login_flow_with_state():
 
         print_info("  Navigating to myUNSW...")
         try:
-            await page.goto(MYUNSW_BASE, wait_until="commit", timeout=30000)
+            # Use the clientredirect endpoint to start the SSO chain
+            await page.goto(
+                f"{MYUNSW_BASE}/portal/clientredirect?client_name=azuread&service=https%3A%2F%2Fmy.unsw.edu.au%2Fportal%2F",
+                wait_until="commit",
+                timeout=30000,
+            )
         except Exception as e:
             print_info(f"  (Navigation note: {e})")
 
@@ -313,7 +318,12 @@ async def _browser_login_flow() -> Optional[dict[str, str]]:
 
         print_info("  Navigating to myUNSW...")
         try:
-            await page.goto(MYUNSW_BASE, wait_until="commit", timeout=30000)
+            # Use the clientredirect endpoint to start the SSO chain
+            await page.goto(
+                f"{MYUNSW_BASE}/portal/clientredirect?client_name=azuread&service=https%3A%2F%2Fmy.unsw.edu.au%2Fportal%2F",
+                wait_until="commit",
+                timeout=30000,
+            )
         except Exception as e:
             print_info(f"  (Navigation note: {e})")
 

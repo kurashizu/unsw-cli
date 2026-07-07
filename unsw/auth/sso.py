@@ -292,47 +292,47 @@ async def _sso_login_flow(config: Config, platforms: list[str]) -> dict[str, boo
                     print_warning("✗ Moodle login did not complete.")
 
             # ── myUNSW ────────────────────────────────
-            if "myunsw" in platforms:
-                print_info("\n🎓 myUNSW login")
-                # Navigate to /portal/ which triggers the SSO redirect chain
-                # and shows the user the Microsoft login page.
-                print_info(f"  Navigating to {MYUNSW_URL}/portal/ ...")
+                    if "myunsw" in platforms:
+                        print_info("\n🎓 myUNSW login")
+                        # Navigate to /portal/clientredirect which kicks off the
+                        # Azure AD SSO chain and presents the Sign On button.
+                        print_info(f"  Navigating to {MYUNSW_URL}/portal/clientredirect ...")
+                        try:
+                            await page.goto(
+                                f"{MYUNSW_URL}/portal/clientredirect?client_name=azuread&service=https%3A%2F%2Fmy.unsw.edu.au%2Fportal%2F",
+                                wait_until="commit",
+                                timeout=30000,
+                            )
+                        except Exception as e:
+                            print_info(f"  (Navigation note: {e})")
+
+                        session_cookies = await _wait_for_myunsw_login(context, page)
+            if session_cookies:
+                # Save cookies AND the full browser storage state.
+                # myUNSW's DISSESSIONAuthnDelegation JWT appears to be
+                # session-bound, so we need the full state to resume.
+                all_cookies = config.load_cookies()
+                for k, v in session_cookies.items():
+                    all_cookies[f"myunsw_{k}"] = v
+                config.save_cookies(all_cookies)
+
+                # Save the entire browser state for later reuse
                 try:
-                    await page.goto(
-                        f"{MYUNSW_URL}/portal/",
-                        wait_until="commit",
-                        timeout=30000,
-                    )
+                    state = await context.storage_state()
+                    from unsw.config import CONFIG_DIR
+
+                    state_path = CONFIG_DIR / "myunsw_storage.json"
+                    state_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(state_path, "w") as f:
+                        json.dump(state, f, indent=2, default=str)
+                    print_info("  ✓ myUNSW browser state saved for future sessions")
                 except Exception as e:
-                    print_info(f"  (Navigation note: {e})")
+                    print_info(f"  (Note: Could not save browser state: {e})")
 
-                session_cookies = await _wait_for_myunsw_login(context, page)
-                if session_cookies:
-                    # Save cookies AND the full browser storage state.
-                    # myUNSW's DISSESSIONAuthnDelegation JWT appears to be
-                    # session-bound, so we need the full state to resume.
-                    all_cookies = config.load_cookies()
-                    for k, v in session_cookies.items():
-                        all_cookies[f"myunsw_{k}"] = v
-                    config.save_cookies(all_cookies)
-
-                    # Save the entire browser state for later reuse
-                    try:
-                        state = await context.storage_state()
-                        from unsw.config import CONFIG_DIR
-
-                        state_path = CONFIG_DIR / "myunsw_storage.json"
-                        state_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(state_path, "w") as f:
-                            json.dump(state, f, indent=2, default=str)
-                        print_info("  ✓ myUNSW browser state saved for future sessions")
-                    except Exception as e:
-                        print_info(f"  (Note: Could not save browser state: {e})")
-
-                    print_success("✓ myUNSW session captured and saved!")
-                    results["myunsw"] = True
-                else:
-                    print_warning("✗ myUNSW login did not complete.")
+                print_success("✓ myUNSW session captured and saved!")
+                results["myunsw"] = True
+            else:
+                print_warning("✗ myUNSW login did not complete.")
 
         finally:
             print_info("\n  Closing browser...")

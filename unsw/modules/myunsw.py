@@ -33,6 +33,7 @@ PORTAL_URLS_TO_TRY = [
     f"{MYUNSW_BASE}/portal/",
     f"{MYUNSW_BASE}/portal/student/",
     f"{MYUNSW_BASE}/portal/enrolment/",
+    "https://nucleus.unsw.edu.au/en",
 ]
 
 
@@ -143,6 +144,16 @@ def _scrape_courses_sync(config: Config) -> list[dict[str, Any]]:
         return []
 
     if not html:
+        # Session expired or invalid — open Nucleus as fallback
+        print_info(
+            "Could not scrape enrolled courses automatically. "
+            "Opening Nucleus student hub in your browser..."
+        )
+        try:
+            webbrowser.open("https://nucleus.unsw.edu.au/en")
+            print_info("Navigate to: My Studies → My Courses to view enrolled classes.")
+        except Exception:
+            pass
         return []
 
     soup = BeautifulSoup(html, "html.parser")
@@ -184,6 +195,16 @@ def _scrape_timetable_sync(config: Config) -> list[dict[str, Any]]:
         return []
 
     if not html:
+        # Session expired or invalid — open Nucleus as fallback
+        print_info(
+            "Could not scrape timetable automatically. "
+            "Opening Nucleus student hub in your browser..."
+        )
+        try:
+            webbrowser.open("https://nucleus.unsw.edu.au/en")
+            print_info("Navigate to: My Studies → My Timetable to view your schedule.")
+        except Exception:
+            pass
         return []
 
     soup = BeautifulSoup(html, "html.parser")
