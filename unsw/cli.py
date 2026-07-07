@@ -985,6 +985,24 @@ def grades(
         print_info("No grades found or myUNSW not configured.")
         return
 
+    # Annotate each entry with the term label (so it's visible in the table)
+    if term:
+        from unsw.modules.myunsw import _term_code_to_label
+
+        term_label = _term_code_to_label(term)
+        # Save the original 'session' (Teaching Period ...) info to a separate field
+        for entry in result:
+            if "session" in entry:
+                entry["session"] = entry.pop("session", "")
+            entry["term"] = term_label
+    else:
+        from unsw.modules.myunsw import _term_code_to_label
+
+        for entry in result:
+            # When no term specified, we fetched multiple terms;
+            # the 'term' field is the session label (Teaching Period One)
+            pass
+
     fmt = "json" if json_output else "table"
     format_output(
         result,
