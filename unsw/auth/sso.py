@@ -148,100 +148,106 @@ async def _wait_for_myunsw_login(context, page) -> Optional[dict[str, str]]:
     }
 
     while time.time() - start_time < TIMEOUT:
-        poll_count += 1
-        try:
-            # Step 1: Check we're not still on a login page
-            current_url = (page.url or "").lower()
-            on_login_page = any(
-                fragment in current_url
-                for fragment in (
-                    "sso.unsw.edu.au/cas/login",
-                    "login.microsoftonline.com",
-                    "login.live.com",
-                )
-            )
-            if on_login_page:
-                if not showed_message:
-                    showed_message = True
-                    print_info("  ⏳ Waiting for you to complete the login...")
-                await asyncio.sleep(POLL_INTERVAL)
-                continue
-
-            # Step 2: Check we're not on the public myUNSW search page
+            poll_count += 1
             try:
-                html = await page.content()
-            except Exception:
-                html = ""
-            is_public = (
-                "Single Sign On" in html
-                or "Welcome to Single Sign On" in html
-                or "Apply Online" in html
-                or "Future Students" in html
-            )
-            if is_public:
-                if not showed_message:
-                    showed_message = True
-                    print_info("  ⏳ Waiting for you to complete the login...")
-                await asyncio.sleep(POLL_INTERVAL)
-                continue
-
-            # Step 3: Collect cookies, look for strong session indicators
-            all_cookies = await context.cookies()
-            cookies = {}
-            has_strong_session = False
-            for c in all_cookies:
-                domain = c.get("domain", "")
-                name = c["name"]
-                value = c.get("value", "")
-                if not value:
+                # Step 1: Check we're not still on a login page
+                current_url = (page.url or "").lower()
+                on_login_page = any(
+                    fragment in current_url
+                    for fragment in (
+                        "sso.unsw.edu.au/cas/login",
+                        "login.microsoftonline.com",
+                        "login.live.com",
+                    )
+                )
+                if on_login_page:
+                    if not showed_message:
+                        showed_message = True
+                        print_info("  ⏳ Waiting for you to complete the login...")
+                    await asyncio.sleep(POLL_INTERVAL)
                     continue
-                cookies[name] = value
-                if name in STRONG_SESSION_COOKIES:
-                    has_strong_session = True
 
-            if not has_strong_session:
-                if not showed_message:
-                    showed_message = True
-                    print_info("  ⏳ Waiting for you to complete the login...")
-                await asyncio.sleep(POLL_INTERVAL)
-                continue
-
-            # All checks pass — user is logged in
-            print_info("  ✅ myUNSW session detected!")
-
-            # IMPORTANT: navigate to an /active/ URL so the server sets a
-            # JSESSIONID cookie scoped to path=/active (not just /portal).
-            # Without this, plain httpx requests to /active/... endpoints
-            # fail because the wrong-scoped JSESSIONID is sent.
-            print_info("  Establishing /active session (BSDS endpoints)...")
-            try:
-                await page.goto(
-                    f"{MYUNSW_URL}/active/studentClassEnrol/years.xml",
-                    wait_until="domcontentloaded",
-                    timeout=15000,
+                # Step 2: Check we're not on the public myUNSW search page
+                # (but allow the post-login /portal/clientredirect?client_name=azuread&ticket=...
+                #  page — that means SSO succeeded and the ticket is being consumed)
+                try:
+                    html = await page.content()
+                except Exception:
+                    html = ""
+                is_post_login_redirect = (
+                    "clientredirect" in current_url
+                    and "ticket=" in current_url
                 )
-                # Give the server a moment to issue the cookie
-                await asyncio.sleep(1.5)
-                # Re-collect cookies — should now include JSESSIONID path=/active
+                is_public = (
+                    "Single Sign On" in html
+                    or "Welcome to Single Sign On" in html
+                    or "Apply Online" in html
+                    or "Future Students" in html
+                )
+                if is_public and not is_post_login_redirect:
+                    if not showed_message:
+                        showed_message = True
+                        print_info("  ⏳ Waiting for you to complete the login...")
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
+
+                # Step 3: Collect cookies, look for strong session indicators
                 all_cookies = await context.cookies()
+                cookies = {}
+                has_strong_session = False
                 for c in all_cookies:
-                    if c.get("value"):
-                        cookies[c["name"]] = c["value"]
-                print_info("  ✅ BSDS session cookie acquired")
-            except Exception as e:
-                print_info(f"  (Could not prime /active session: {e})")
+                    domain = c.get("domain", "")
+                    name = c["name"]
+                    value = c.get("value", "")
+                    if not value:
+                        continue
+                    cookies[name] = value
+                    if name in STRONG_SESSION_COOKIES:
+                        has_strong_session = True
 
-            return cookies
+                if not has_strong_session:
+                    if not showed_message:
+                        showed_message = True
+                        print_info("  ⏳ Waiting for you to complete the login...")
+                    await asyncio.sleep(POLL_INTERVAL)
+                    continue
 
-        except Exception:
-            pass
+                # All checks pass — user is logged in
+                print_info("  ✅ myUNSW session detected!")
 
-        # Heartbeat every 30s
-        if poll_count % 30 == 0:
-            elapsed = int(time.time() - start_time)
-            print_info(f"  Still waiting... ({elapsed}s elapsed)")
+                # IMPORTANT: navigate to an /active/ URL so the server sets a
+                # JSESSIONID cookie scoped to path=/active (not just /portal).
+                # Without this, plain httpx requests to /active/... endpoints
+                # fail because the wrong-scoped JSESSIONID is sent.
+                print_info("  Establishing /active session (BSDS endpoints)...")
+                try:
+                    await page.goto(
+                        f"{MYUNSW_URL}/active/studentClassEnrol/years.xml",
+                        wait_until="domcontentloaded",
+                        timeout=15000,
+                    )
+                    # Give the server a moment to issue the cookie
+                    await asyncio.sleep(1.5)
+                    # Re-collect cookies — should now include JSESSIONID path=/active
+                    all_cookies = await context.cookies()
+                    for c in all_cookies:
+                        if c.get("value"):
+                            cookies[c["name"]] = c["value"]
+                    print_info("  ✅ BSDS session cookie acquired")
+                except Exception as e:
+                    print_info(f"  (Could not prime /active session: {e})")
 
-        await asyncio.sleep(POLL_INTERVAL)
+                return cookies
+
+            except Exception:
+                pass
+
+            # Heartbeat every 30s
+            if poll_count % 30 == 0:
+                elapsed = int(time.time() - start_time)
+                print_info(f"  Still waiting... ({elapsed}s elapsed)")
+
+            await asyncio.sleep(POLL_INTERVAL)
 
     print_info(f"  ⏱  Timeout ({TIMEOUT // 60} min) reached.")
     return None
