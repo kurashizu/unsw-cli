@@ -55,8 +55,12 @@ def login_via_browser(config: Config) -> bool:
         print_info(f"  Details: {traceback.format_exc()}")
         return False
 
-    if result:
-        cookies, context = result
+    if not result:
+        return False
+
+    cookies, storage_state, browser, context = result
+
+    try:
         # Save cookies with myunsw_ prefix
         all_cookies = config.load_cookies()
         for key, value in cookies.items():
@@ -65,29 +69,50 @@ def login_via_browser(config: Config) -> bool:
         print_success("myUNSW session cookies captured and saved!")
 
         # Save browser storage state for future use
-        try:
-            from unsw.config import CONFIG_DIR
-
-            state = asyncio.run(context.storage_state())
-            state_path = CONFIG_DIR / "myunsw_storage.json"
-            state_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(state_path, "w") as f:
-                json.dump(state, f, indent=2, default=str)
-            print_success("✓ myUNSW browser state saved for future sessions")
-        except Exception as e:
-            print_info(f"  (Could not save storage state: {e})")
-        finally:
+        if storage_state:
             try:
-                asyncio.run(context.close())
-            except Exception:
-                pass
-        return True
+                from unsw.config import CONFIG_DIR
 
-    return False
+                state_path = CONFIG_DIR / "myunsw_storage.json"
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(state_path, "w") as f:
+                    json.dump(storage_state, f, indent=2, default=str)
+                print_success("✓ myUNSW browser state saved for future sessions")
+            except Exception as e:
+                print_info(f"  (Could not write storage state: {e})")
+    finally:
+        # Close the browser — it's safe to close now
+        try:
+            await_or_run(context.close)
+        except Exception:
+            pass
+        try:
+            await_or_run(browser.close)
+        except Exception:
+            pass
+
+    return True
+
+
+def await_or_run(coro_func):
+    """Helper: run an async cleanup function whether or not we're in an event loop."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're inside an async context — schedule the close
+            loop.create_task(coro_func())
+        else:
+            loop.run_until_complete(coro_func())
+    except RuntimeError:
+        asyncio.run(coro_func())
 
 
 async def _browser_login_flow_with_state():
-    """Like _browser_login_flow but also returns the context for state-saving."""
+    """Like _browser_login_flow but also saves the storage_state.
+
+    Returns (cookies, storage_state_dict, browser_ref). The caller is
+    responsible for closing the browser.
+    """
     from playwright.async_api import async_playwright
 
     print_info("Opening browser for myUNSW login...")
@@ -130,50 +155,57 @@ async def _browser_login_flow_with_state():
             await browser.close()
             return None
 
+        print_info("  Navigating to myUNSW...")
         try:
-            print_info("  Navigating to myUNSW...")
-            try:
-                await page.goto(MYUNSW_BASE, wait_until="commit", timeout=30000)
-            except Exception as e:
-                print_info(f"  (Navigation note: {e})")
-
-            print_info("  Browser is open. Waiting for you to log in...")
-
-            await asyncio.sleep(2)
-
-            start_time = time.time()
-            captured_cookies = None
-
-            while time.time() - start_time < TIMEOUT:
-                try:
-                    cookies = await context.cookies()
-                    cookies_dict = {}
-                    for c in cookies:
-                        if not c.get("value"):
-                            continue
-                        cookies_dict[c["name"]] = c["value"]
-
-                    if await _verify_session_async(cookies_dict):
-                        captured_cookies = cookies_dict
-                        print_info("\n  ✅ myUNSW session verified!")
-                        return captured_cookies, context
-                except Exception:
-                    pass
-
-                await asyncio.sleep(POLL_INTERVAL)
-
-            print_info(f"\n  Timeout ({TIMEOUT // 60} min) reached.")
-            await context.close()
-            await browser.close()
-            return None
+            await page.goto(MYUNSW_BASE, wait_until="commit", timeout=30000)
         except Exception as e:
-            print_error(f"Browser login flow failed: {e}")
+            print_info(f"  (Navigation note: {e})")
+
+        print_info("  Browser is open. Waiting for you to log in...\n")
+
+        await asyncio.sleep(2)
+
+        start_time = time.time()
+        captured_cookies = None
+
+        while time.time() - start_time < TIMEOUT:
+            try:
+                cookies = await context.cookies()
+                cookies_dict = {}
+                for c in cookies:
+                    if not c.get("value"):
+                        continue
+                    cookies_dict[c["name"]] = c["value"]
+
+                if await _verify_session_async(cookies_dict):
+                    captured_cookies = cookies_dict
+                    print_info("\n  ✅ myUNSW session verified!")
+                    break
+            except Exception:
+                pass
+
+            await asyncio.sleep(POLL_INTERVAL)
+
+        if not captured_cookies:
+            print_info(f"\n  Timeout ({TIMEOUT // 60} min) reached.")
             try:
                 await context.close()
+            except Exception:
+                pass
+            try:
                 await browser.close()
             except Exception:
                 pass
             return None
+
+        # Capture storage_state while the context is still alive
+        try:
+            storage_state = await context.storage_state()
+        except Exception as e:
+            print_warning(f"Could not capture storage state: {e}")
+            storage_state = None
+
+        return captured_cookies, storage_state, browser, context
 
 
 async def _browser_login_flow() -> Optional[dict[str, str]]:
