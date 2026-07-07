@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Optional
 
@@ -291,6 +292,7 @@ async def _sso_login_flow(config: Config, platforms: list[str]) -> dict[str, boo
                     try:
                         state = await context.storage_state()
                         from unsw.config import CONFIG_DIR
+
                         state_path = CONFIG_DIR / "myunsw_storage.json"
                         state_path.parent.mkdir(parents=True, exist_ok=True)
                         with open(state_path, "w") as f:
