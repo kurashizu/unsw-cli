@@ -236,8 +236,27 @@ async def _browser_login_flow_with_state():
 
                 # Final confirmation: the verifier returns True
                 if await _verify_session_async(cookies_dict):
+                    # Prime the /active/ session so the BSDS endpoints
+                    # get a JSESSIONID cookie scoped to path=/active.
+                    try:
+                        print_info(
+                            "  Establishing /active session for BSDS endpoints..."
+                        )
+                        await page.goto(
+                            f"{MYUNSW_BASE}/active/studentClassEnrol/years.xml",
+                            wait_until="domcontentloaded",
+                            timeout=15000,
+                        )
+                        await asyncio.sleep(1.5)
+                        all_cookies = await context.cookies()
+                        for c in all_cookies:
+                            if c.get("value"):
+                                cookies_dict[c["name"]] = c["value"]
+                    except Exception as e:
+                        print_info(f"  (Could not prime /active session: {e})")
+
                     captured_cookies = cookies_dict
-                    print_info("\n  ✅ myUNSW session verified!")
+                    print_info("\n  ✅ myUNSW session verified! Login successful!")
                     break
             except Exception:
                 pass
