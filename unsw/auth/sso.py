@@ -38,7 +38,9 @@ MYUNSW_URL = "https://my.unsw.edu.au"
 MYUNSW_COOKIE_NAMES = {"PS_TOKEN", "PS_TOKENEXPIRE", "myunsw_session"}
 
 # Common SSO/identity cookies that indicate Azure AD auth completed
-SSO_COOKIE_NAMES = {"ESTSAUTHPERSISTENT", "SignInStateCookie", "buid"}
+# NOTE: 'buid' is intentionally excluded — it's a browser-unique ID
+# that's set on first visit, before login completes.
+SSO_COOKIE_NAMES = {"ESTSAUTHPERSISTENT", "SignInStateCookie"}
 
 POLL_INTERVAL = 1.0  # seconds
 TIMEOUT = 600  # 10 minutes per platform
@@ -119,12 +121,10 @@ async def _wait_for_moodle_login(context) -> Optional[str]:
 async def _wait_for_myunsw_login(context, page) -> Optional[dict[str, str]]:
     """Wait for user to complete myUNSW SSO, return the verified session cookies.
 
-    Strategy: poll the browser's cookies without navigating the page.
-    We accept any of these as proof of a successful login:
-    - PS_TOKEN on my.unsw.edu.au (legacy PeopleSoft session)
-    - ESTSAUTHPERSISTENT on login.microsoftonline.com (Azure AD persistent SSO)
-    - SignInStateCookie on login.microsoftonline.com (Azure AD sign-in state)
-    - _iam_id or other iam.unsw.edu.au session cookies
+    Strategy: check the actual browser URL — wait until we're past
+    the SSO login pages AND on a real (non-public) myUNSW page AND
+    we have real session cookies set. We do NOT use 'buid' as an
+    indicator (it's set too early, before user types anything).
     """
     print_info("  1. Wait for the myUNSW page to load")
     print_info("  2. Log in with your UNSW zID and password (Azure AD SSO)")
@@ -138,57 +138,85 @@ async def _wait_for_myunsw_login(context, page) -> Optional[dict[str, str]]:
     poll_count = 0
     showed_message = False
 
+    # Strong auth indicators that are only set AFTER successful login:
+    STRONG_SESSION_COOKIES = {
+        "ESTSAUTHPERSISTENT",  # Azure AD persistent SSO
+        "SignInStateCookie",  # Azure AD sign-in state
+        "DISSESSIONAuthnDelegation",  # myUNSW CAS delegation JWT
+        "PS_TOKEN",  # Legacy PeopleSoft session
+        "PS_TOKENEXPIRE",
+    }
+
     while time.time() - start_time < TIMEOUT:
         poll_count += 1
         try:
-            all_cookies = await context.cookies()
+            # Step 1: Check we're not still on a login page
+            current_url = (page.url or "").lower()
+            on_login_page = any(
+                fragment in current_url
+                for fragment in (
+                    "sso.unsw.edu.au/cas/login",
+                    "login.microsoftonline.com",
+                    "login.live.com",
+                )
+            )
+            if on_login_page:
+                if not showed_message:
+                    showed_message = True
+                    print_info("  ⏳ Waiting for you to complete the login...")
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
 
+            # Step 2: Check we're not on the public myUNSW search page
+            try:
+                html = await page.content()
+            except Exception:
+                html = ""
+            is_public = (
+                "Single Sign On" in html
+                or "Welcome to Single Sign On" in html
+                or "Apply Online" in html
+                or "Future Students" in html
+            )
+            if is_public:
+                if not showed_message:
+                    showed_message = True
+                    print_info("  ⏳ Waiting for you to complete the login...")
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
+
+            # Step 3: Collect cookies, look for strong session indicators
+            all_cookies = await context.cookies()
             cookies = {}
-            has_session = False
+            has_strong_session = False
             for c in all_cookies:
                 domain = c.get("domain", "")
                 name = c["name"]
                 value = c.get("value", "")
                 if not value:
                     continue
+                cookies[name] = value
+                if name in STRONG_SESSION_COOKIES:
+                    has_strong_session = True
 
-                # Legacy PeopleSoft indicator
-                if name in MYUNSW_COOKIE_NAMES and "my.unsw.edu.au" in domain:
-                    cookies[name] = value
-                    has_session = True
+            if not has_strong_session:
+                if not showed_message:
+                    showed_message = True
+                    print_info("  ⏳ Waiting for you to complete the login...")
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
 
-                # Azure AD SSO cookies — strongest indicator of successful login
-                elif (
-                    "login.microsoftonline.com" in domain or "login.live.com" in domain
-                ) and name in SSO_COOKIE_NAMES:
-                    cookies[name] = value
-                    has_session = True
-
-                # UNSW IAM identity manager cookies
-                elif "iam.unsw.edu.au" in domain:
-                    cookies[name] = value
-                    if name.startswith("_iam_") or "session" in name.lower():
-                        has_session = True
-
-                # Keep myUNSW/UNSW cookies for later use
-                elif "my.unsw.edu.au" in domain or "unsw.edu.au" in domain:
-                    cookies[name] = value
-
-            if has_session:
-                print_info("  ✅ myUNSW session detected!")
-                return cookies
-
-            if not showed_message:
-                showed_message = True
-                print_info("  ⏳ Waiting for you to complete the login...")
-
-            # Heartbeat every 30s
-            if poll_count % 30 == 0:
-                elapsed = int(time.time() - start_time)
-                print_info(f"  Still waiting... ({elapsed}s elapsed)")
+            # All checks pass — user is logged in
+            print_info("  ✅ myUNSW session detected!")
+            return cookies
 
         except Exception:
             pass
+
+        # Heartbeat every 30s
+        if poll_count % 30 == 0:
+            elapsed = int(time.time() - start_time)
+            print_info(f"  Still waiting... ({elapsed}s elapsed)")
 
         await asyncio.sleep(POLL_INTERVAL)
 
