@@ -262,7 +262,7 @@ async def _sso_login_flow(config: Config, platforms: list[str]) -> dict[str, boo
                 else:
                     print_warning("✗ Moodle login did not complete.")
 
-            # ── myUNSW ─────────────────────────────────
+            # ── myUNSW ────────────────────────────────
             if "myunsw" in platforms:
                 print_info("\n🎓 myUNSW login")
                 # Navigate to /portal/ which triggers the SSO redirect chain
@@ -279,11 +279,26 @@ async def _sso_login_flow(config: Config, platforms: list[str]) -> dict[str, boo
 
                 session_cookies = await _wait_for_myunsw_login(context, page)
                 if session_cookies:
-                    # Save with myunsw_ prefix to namespace them
+                    # Save cookies AND the full browser storage state.
+                    # myUNSW's DISSESSIONAuthnDelegation JWT appears to be
+                    # session-bound, so we need the full state to resume.
                     all_cookies = config.load_cookies()
                     for k, v in session_cookies.items():
                         all_cookies[f"myunsw_{k}"] = v
                     config.save_cookies(all_cookies)
+
+                    # Save the entire browser state for later reuse
+                    try:
+                        state = await context.storage_state()
+                        from unsw.config import CONFIG_DIR
+                        state_path = CONFIG_DIR / "myunsw_storage.json"
+                        state_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(state_path, "w") as f:
+                            json.dump(state, f, indent=2, default=str)
+                        print_info("  ✓ myUNSW browser state saved for future sessions")
+                    except Exception as e:
+                        print_info(f"  (Note: Could not save browser state: {e})")
+
                     print_success("✓ myUNSW session captured and saved!")
                     results["myunsw"] = True
                 else:

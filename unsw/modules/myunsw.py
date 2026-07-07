@@ -1,24 +1,233 @@
 """myUNSW module - course enrolment and student services.
 
-Provides access to myUNSW for viewing enrolled courses and managing enrolment.
-Since myUNSW is a PeopleSoft application with complex JavaScript forms,
-actual enrolment operations open the myUNSW page in your browser for safety.
+myUNSW is now a JavaScript SPA behind Azure AD SSO. Cookies alone
+don't authenticate cross-domain — the DISSESSIONAuthnDelegation JWT
+appears to be tied to the browser session. So we drive a real Playwright
+browser, load the saved cookies, navigate to the portal, and scrape
+the post-JS rendered DOM.
+
+For operations that can't be reliably scraped (like enrolment), we
+fall back to opening the user's browser with step-by-step instructions.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 import webbrowser
+from pathlib import Path
 from typing import Any, Optional
 
 from bs4 import BeautifulSoup
 
 from unsw.auth.myunsw import login_with_cookie
-from unsw.config import Config
+from unsw.config import CONFIG_DIR, Config
 from unsw.modules.base import BaseModule
-from unsw.utils.output import print_info
+from unsw.utils.output import print_info, print_warning
 
 MYUNSW_BASE = "https://my.unsw.edu.au"
+
+# URLs that may contain enrolled-class data (we try them in order)
+PORTAL_URLS_TO_TRY = [
+    f"{MYUNSW_BASE}/portal/",
+    f"{MYUNSW_BASE}/portal/student/",
+    f"{MYUNSW_BASE}/portal/enrolment/",
+]
+
+
+def _load_myunsw_cookies(config: Config) -> list[dict[str, str]]:
+    """Load saved myUNSW cookies as Playwright-compatible cookie dicts."""
+    saved = config.load_cookies()
+    cookies = []
+    for key, value in saved.items():
+        if not key.startswith("myunsw_"):
+            continue
+        cookies.append(
+            {
+                "name": key.removeprefix("myunsw_"),
+                "value": value,
+                "domain": ".my.unsw.edu.au",
+                "path": "/",
+            }
+        )
+    return cookies
+
+
+async def _scrape_with_playwright(
+    config: Config, urls: list[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Open a headless browser with saved browser state, navigate to URLs,
+    return the final URL and the rendered HTML of the last successful page.
+
+    Uses Playwright's storage_state to load the full browser context
+    (cookies + localStorage + sessionStorage + IndexedDB). This is
+    critical for myUNSW because its DISSESSIONAuthnDelegation JWT appears
+    to be session-bound and doesn't work cross-session via plain cookies.
+
+    If authentication fails (we land back on a login page), returns None.
+    """
+    from playwright.async_api import async_playwright
+
+    state_path = CONFIG_DIR / "myunsw_storage.json"
+    storage_state = None
+    if state_path.exists():
+        try:
+            with open(state_path) as f:
+                storage_state = json.load(f)
+        except Exception:
+            pass
+
+    # Fall back to cookies if no storage state
+    cookies = _load_myunsw_cookies(config)
+    if not storage_state and not cookies:
+        return None, None
+
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(headless=True)
+        except Exception:
+            return None, None
+
+        try:
+            if storage_state:
+                context = await browser.new_context(storage_state=storage_state)
+            else:
+                context = await browser.new_context()
+                await context.add_cookies(cookies)
+            page = await context.new_page()
+
+            final_url = None
+            final_html = None
+
+            for url in urls:
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                    # Give JS time to render
+                    await asyncio.sleep(2)
+                    final_url = page.url
+                    # If we got bounced back to a login page, give up
+                    if (
+                        "sso.unsw.edu.au" in final_url.lower()
+                        or "login.microsoftonline" in final_url.lower()
+                    ):
+                        return None, None
+                    # Check if we're on the public search page (also unauthed)
+                    html = await page.content()
+                    if "Single Sign On" in html or "Welcome to Single Sign On" in html:
+                        return None, None
+                    final_url = final_url
+                    final_html = html
+                    # If we found something useful, stop
+                    break
+                except Exception:
+                    continue
+
+            await context.close()
+            await browser.close()
+            return final_url, final_html
+
+        except Exception:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            return None, None
+
+
+def _scrape_courses_sync(config: Config) -> list[dict[str, Any]]:
+    """Synchronous wrapper around _scrape_with_playwright for course scraping."""
+    try:
+        url, html = asyncio.run(_scrape_with_playwright(config, PORTAL_URLS_TO_TRY))
+    except Exception:
+        return []
+
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    courses = []
+    seen = set()
+
+    # Strategy 1: Look for course codes anywhere in the rendered page
+    full_text = soup.get_text(" ", strip=True)
+    codes = re.findall(r"[A-Z]{4}\d{4}", full_text)
+    for code in codes:
+        if code not in seen:
+            seen.add(code)
+            # Try to extract course name and term from surrounding text
+            name = ""
+            term = ""
+            pattern = rf"{re.escape(code)}\s*[-–—:]?\s*([A-Z][A-Za-z][^\(\)]{{3,60}}?)(?:\s*[-–—]\s*(20\d{{2}}\s*T[123S])|\s*\()"
+            m = re.search(pattern, full_text)
+            if m:
+                name = m.group(1).strip()
+                if m.group(2):
+                    term = m.group(2)
+            courses.append(
+                {
+                    "code": code,
+                    "name": name or code,
+                    "term": term,
+                    "status": "Enrolled",
+                }
+            )
+
+    return courses
+
+
+def _scrape_timetable_sync(config: Config) -> list[dict[str, Any]]:
+    """Synchronous wrapper around _scrape_with_playwright for timetable scraping."""
+    try:
+        url, html = asyncio.run(_scrape_with_playwright(config, PORTAL_URLS_TO_TRY))
+    except Exception:
+        return []
+
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    classes = []
+    seen = set()
+
+    full_text = soup.get_text(" ", strip=True)
+    codes = re.findall(r"[A-Z]{4}\d{4}", full_text)
+
+    for code in codes:
+        if code in seen:
+            continue
+        seen.add(code)
+
+        # Look for day/time/location patterns near this code
+        # Match patterns like "Mon 13:00-15:00" or "Monday 1:00 PM"
+        day_match = re.search(
+            rf"{re.escape(code)}.{{0,200}}?((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*)",
+            full_text,
+        )
+        time_match = re.search(
+            rf"{re.escape(code)}.{{0,300}}?"
+            r"(\d{1,2}:\d{2}\s*(?:am|pm)?\s*[-–—]\s*\d{1,2}:\d{2}\s*(?:am|pm)?)",
+            full_text,
+            re.IGNORECASE,
+        )
+        loc_match = re.search(
+            rf"{re.escape(code)}.{{0,400}}?((?:UNSW|Ainsworth|Bus|Room|Lecture)[^\s,]*)",
+            full_text,
+        )
+
+        classes.append(
+            {
+                "code": code,
+                "section": "",
+                "activity": "",
+                "day": day_match.group(1) if day_match else "",
+                "time": time_match.group(1) if time_match else "",
+                "location": loc_match.group(1) if loc_match else "",
+                "weeks": "",
+            }
+        )
+
+    return classes
 
 
 class MyUNSWModule(BaseModule):
@@ -34,7 +243,6 @@ class MyUNSWModule(BaseModule):
 
     # ── Enrolled Courses ─────────────────────────────────────
 
-    # PeopleSoft URLs for authenticated users
     ENROLLED_URL = (
         "https://my.unsw.edu.au/psc/ps/EMPLOYEE/HRMS/c/"
         "SA_LEARNER_SERVICES.SSR_SSENRL_LIST.GBL"
@@ -45,92 +253,21 @@ class MyUNSWModule(BaseModule):
     )
 
     def get_enrolled_courses(self) -> list[dict[str, Any]]:
-        """Get list of currently enrolled courses by scraping myUNSW.
+        """Get list of currently enrolled courses.
 
-        Returns a list of dicts with keys: code, name, term, status.
+        Uses Playwright to drive a headless browser with saved cookies,
+        navigates to the myUNSW portal, waits for JS to render, then
+        scrapes the DOM for course codes.
         """
         if not self.client:
             return []
 
-        try:
-            # Access the myUNSW enrolled classes page (PeopleSoft)
-            resp = self.client.get(self.ENROLLED_URL)
-            if resp.status_code != 200:
-                # Fallback: try the portal root
-                resp = self.client.get(f"{MYUNSW_BASE}/portal/")
-                if resp.status_code != 200:
-                    return []
-
-            soup = BeautifulSoup(resp.text, "html.parser")
-            courses = []
-            seen = set()
-
-            # Try multiple approaches to find enrolled courses
-            # 1. Look for course cards / enrolment tables
-            for item in soup.select(
-                '[class*="course"], [class*="enrol"], '
-                '[class*="class"], .ps_box-group, '
-                "table[id*='SSR_SSENRL'] tr, "
-                "table[id*='CLASS'] tr, "
-                "[class*='psc-row'], [class*='ps_grid-row']"
-            ):
-                text = item.get_text(" ", strip=True)
-                if not text:
-                    continue
-                # Look for course codes like COMP6733
-                codes = re.findall(r"[A-Z]{4}\d{4}", text)
-                for code in codes:
-                    if code not in seen:
-                        seen.add(code)
-                        # Try to extract term and name
-                        name = ""
-                        term = ""
-                        name_match = re.search(
-                            rf"{re.escape(code)}\s*[-–—]\s*(.+?)(?:\s*[-–—]\s*|\s*\()",
-                            text,
-                        )
-                        if name_match:
-                            name = name_match.group(1).strip()
-                        term_match = re.search(r"(20\d{2})\s*T[123S]", text)
-                        if term_match:
-                            term = term_match.group(0)
-                        courses.append(
-                            {
-                                "code": code,
-                                "name": name or code,
-                                "term": term,
-                                "status": "Enrolled",
-                            }
-                        )
-
-            # 2. Fallback: scan the entire page for course codes
-            if not courses:
-                full_text = soup.get_text(" ", strip=True)
-                codes = re.findall(r"[A-Z]{4}\d{4}", full_text)
-                for code in codes:
-                    if code not in seen:
-                        seen.add(code)
-                        courses.append(
-                            {
-                                "code": code,
-                                "name": code,
-                                "term": "",
-                                "status": "Enrolled",
-                            }
-                        )
-
-            return courses
-
-        except Exception:
-            return []
+        return _scrape_courses_sync(self.config)
 
     # ── Enrolment Action (opens browser) ─────────────────────
 
     def open_enrolment_page(self) -> str:
-        """Open the myUNSW enrolment page in the user's browser.
-
-        Returns the URL that was opened.
-        """
+        """Open the myUNSW enrolment page in the user's browser."""
         url = f"{MYUNSW_BASE}/"
         webbrowser.open(url)
         print_info(f"Opened {url} in your browser.")
@@ -138,10 +275,7 @@ class MyUNSWModule(BaseModule):
         return url
 
     def open_class_search(self, course_code: str = "") -> str:
-        """Open the myUNSW class search page in the user's browser.
-
-        If a course code is provided, it pre-fills the search.
-        """
+        """Open the myUNSW class search page in the user's browser."""
         url = f"{MYUNSW_BASE}/"
         webbrowser.open(url)
         print_info(f"Opened {url} in your browser.")
@@ -150,159 +284,22 @@ class MyUNSWModule(BaseModule):
         print_info("Navigate to: Student Portal → Enrolment → Class Search")
         return url
 
-    # ── Personal Timetable (from myUNSW enrolment) ───────────
+    # ── Personal Timetable ────────────────────────────────────
 
     def get_timetable(self) -> list[dict[str, Any]]:
         """Get personal class timetable from myUNSW enrolment data.
 
-        Scrapes the student's enrolled class schedule, showing
-        when and where each class meets.
-
-        Returns a list of dicts with keys: code, activity, section,
-        day, time, location, weeks.
+        Uses Playwright to render the SPA and extract day/time/location
+        for each enrolled course.
         """
         if not self.client:
             return []
 
-        try:
-            # Try the student class schedule page (PeopleSoft URL)
-            resp = self.client.get(self.ENROLLED_URL)
-
-            # Fallback: try the timetable summary page
-            if resp.status_code != 200:
-                resp = self.client.get(self.TIMETABLE_URL)
-
-            # Last fallback: portal root
-            if resp.status_code != 200:
-                resp = self.client.get(f"{MYUNSW_BASE}/portal/")
-
-            if resp.status_code != 200:
-                return []
-
-            soup = BeautifulSoup(resp.text, "html.parser")
-            classes = []
-            seen = set()
-
-            # Strategy 1: Look for the standard enrolment schedule table
-            # PeopleSoft uses tables with ids like SSR_SSENRL_LIST_* or similar
-            for table in soup.select(
-                "table[id*='SSR_SSENRL_LIST'], "
-                "table[id*='CLASS_SRCH'], "
-                "table[id*='ENRL_LIST'], "
-                "table[class*='psc-table'], "
-                "table[summary*='schedule'], "
-                "table[summary*='class'], "
-                ".ps_box-scroll table"
-            ):
-                rows = table.find_all("tr")
-                for row in rows:
-                    cells = row.find_all("td")
-                    if len(cells) < 5:
-                        continue
-
-                    text = row.get_text(strip=True)
-                    # Ensure it has a course code
-                    codes = re.findall(r"[A-Z]{4}\d{4}", text)
-                    if not codes:
-                        continue
-
-                    code = codes[0]
-                    # Build dedup key
-                    cells_text = [c.get_text(strip=True) for c in cells]
-                    dedup_key = "|".join(cells_text[:6])
-                    if dedup_key in seen:
-                        continue
-                    seen.add(dedup_key)
-
-                    # Extract fields (PeopleSoft column order varies)
-                    # Typical order: section, activity, day, time, location, instructor, weeks
-                    section = cells[0].get_text(strip=True) if len(cells) > 0 else ""
-                    activity = cells[1].get_text(strip=True) if len(cells) > 1 else ""
-                    day = cells[2].get_text(strip=True) if len(cells) > 2 else ""
-                    time = cells[3].get_text(strip=True) if len(cells) > 3 else ""
-                    location = cells[4].get_text(strip=True) if len(cells) > 4 else ""
-                    instructor = cells[5].get_text(strip=True) if len(cells) > 5 else ""
-                    weeks = cells[6].get_text(strip=True) if len(cells) > 6 else ""
-
-                    classes.append(
-                        {
-                            "code": code,
-                            "section": section,
-                            "activity": activity,
-                            "day": day,
-                            "time": time,
-                            "location": location,
-                            "instructor": instructor,
-                            "weeks": weeks,
-                        }
-                    )
-
-            # Strategy 2: Look for course/class info blocks (if no table found)
-            if not classes:
-                for block in soup.select(
-                    "[class*='course'], [class*='class'], "
-                    "[id*='course'], [id*='class'], "
-                    ".ps_box-group, [class*='enrollment']"
-                ):
-                    text = block.get_text(strip=True)
-                    codes = re.findall(r"[A-Z]{4}\d{4}", text)
-                    if not codes:
-                        continue
-
-                    code = codes[0]
-                    if code in seen:
-                        continue
-                    seen.add(code)
-
-                    # Try to extract day/time from text
-                    day = ""
-                    time = ""
-                    location = ""
-                    activity = ""
-
-                    day_match = re.search(r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun)", text)
-                    if day_match:
-                        day = day_match.group(1)
-
-                    time_match = re.search(
-                        r"(\d{1,2}:\d{2}\s*(?:am|pm)\s*-\s*\d{1,2}:\d{2}\s*(?:am|pm))",
-                        text,
-                        re.IGNORECASE,
-                    )
-                    if time_match:
-                        time = time_match.group(1)
-
-                    loc_match = re.search(r"([A-Z][a-z]+\s+\d+)", text)
-                    if loc_match:
-                        location = loc_match.group(1)
-
-                    classes.append(
-                        {
-                            "code": code,
-                            "section": "",
-                            "activity": activity,
-                            "day": day,
-                            "time": time,
-                            "location": location,
-                            "instructor": "",
-                            "weeks": "",
-                        }
-                    )
-
-            return classes
-
-        except Exception:
-            return []
+        return _scrape_timetable_sync(self.config)
 
     def open_timetable_page(self) -> str:
-        """Open the myUNSW timetable / class schedule page in the user's browser.
-
-        Returns the URL that was opened.
-        """
-        url = (
-            f"{MYUNSW_BASE}/psc/ps/EMPLOYEE/HRMS/c/"
-            f"SA_LEARNER_SERVICES.SSR_SSENRL_LIST.GBL"
-        )
+        """Open the myUNSW class schedule page in the user's browser."""
+        url = f"{MYUNSW_BASE}/portal/"
         webbrowser.open(url)
         print_info(f"Opened myUNSW class schedule in your browser.")
         return url
@@ -312,41 +309,29 @@ class MyUNSWModule(BaseModule):
     def search_classes(self, course_code: str) -> list[dict[str, Any]]:
         """Search for available classes by course code.
 
-        NOTE: This is a best-effort implementation. myUNSW's PeopleSoft
-        pages are complex JavaScript forms, so this may not work for all
-        pages. If it fails, use the browser-based search instead.
+        NOTE: myUNSW's class search is a complex JavaScript form. This is
+        a best-effort fallback — for full functionality, use the browser.
         """
         if not self.client:
             return []
 
-        # PeopleSoft class search URL pattern
-        search_url = (
-            f"{MYUNSW_BASE}/psc/ps/EMPLOYEE/HRMS/c/"
-            f"SA_LEARNER_SERVICES.SSR_SSENRL_CART.GBL"
-        )
-
         try:
-            # First, get the search page to extract any required form fields
-            resp = self.client.get(search_url)
+            resp = self.client.get(self.ENROLLED_URL)
+            if resp.status_code != 200:
+                resp = self.client.get(f"{MYUNSW_BASE}/portal/")
             if resp.status_code != 200:
                 return []
 
             soup = BeautifulSoup(resp.text, "html.parser")
-
-            # Look for a class search form
-            # PeopleSoft forms typically have hidden ICS fields
             classes = []
-
-            # Extract class data from tables or search results
             for row in soup.select(
-                "table[id*='SSR_CLSRCH_MTG1'] tr, "
-                "[class*='psc-table'] tr, "
-                "tr[class*='psc-row']"
+                "table[id*='SSR_SSENRL_LIST'] tr, "
+                "table[id*='CLASS_SRCH'] tr, "
+                "table[class*='psc-table'] tr"
             ):
                 cells = row.find_all("td")
                 if len(cells) < 4:
                     continue
-
                 class_nbr = cells[0].get_text(strip=True) if len(cells) > 0 else ""
                 section = cells[1].get_text(strip=True) if len(cells) > 1 else ""
                 activity = cells[2].get_text(strip=True) if len(cells) > 2 else ""
@@ -355,7 +340,6 @@ class MyUNSWModule(BaseModule):
                 location = cells[5].get_text(strip=True) if len(cells) > 5 else ""
                 status = cells[6].get_text(strip=True) if len(cells) > 6 else ""
                 enrols = cells[7].get_text(strip=True) if len(cells) > 7 else ""
-
                 if class_nbr and class_nbr.isdigit():
                     classes.append(
                         {
@@ -369,8 +353,6 @@ class MyUNSWModule(BaseModule):
                             "enrols": enrols,
                         }
                     )
-
             return classes
-
         except Exception:
             return []

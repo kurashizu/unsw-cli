@@ -15,12 +15,20 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
-from unsw.config import Config
-from unsw.utils.output import console, print_error, print_info, print_success
+from unsw.config import CONFIG_DIR, Config
+from unsw.utils.output import (
+    console,
+    print_error,
+    print_info,
+    print_success,
+    print_warning,
+)
 
 MOODLE_URL = "https://moodle.telt.unsw.edu.au"
 COOKIE_NAME = "MoodleSession"
